@@ -1,0 +1,33 @@
+[package]
+name = "ratatui-3dmesh"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.74"
+description = "A reusable Ratatui widget for rendering OBJ/STL 3D meshes as shaded terminal ASCII."
+license = "MIT"
+readme = "README.md"
+repository = "https://github.com/your-org/ratatui-3dmesh"
+keywords = ["ratatui", "tui", "3d", "ascii", "widget"]
+categories = ["command-line-interface", "rendering", "visualization"]
+
+[features]
+default = ["obj", "stl", "mtl"]
+obj = []
+stl = []
+mtl = []
+serde = ["dep:serde"]
+cli-example = ["dep:crossterm"]
+
+[dependencies]
+ratatui = { version = "0.29", default-features = false, features = ["serde"] }
+thiserror = "2"
+serde = { version = "1", features = ["derive"], optional = true }
+
+crossterm = { version = "0.28", optional = true }
+
+[dev-dependencies]
+ratatui = { version = "0.29", default-features = false, features = ["crossterm"] }
+
+[[example]]
+name = "viewer"
+required-features = ["cli-example"]

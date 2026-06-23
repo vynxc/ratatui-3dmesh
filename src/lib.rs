@@ -1,0 +1,36 @@
+//! Embeddable Ratatui 3D mesh viewer.
+//!
+//! `ratatui-3dmesh` renders OBJ/STL meshes into a Ratatui [`ratatui::buffer::Buffer`] as shaded
+//! terminal glyphs. The library is designed as a reusable widget: your app owns
+//! terminal setup, event loops, and layout, while this crate owns mesh loading,
+//! projection, rasterization, and viewer state.
+//!
+//! # Quick start
+//!
+//! ```no_run
+//! use ratatui_3dmesh::{Mesh, Mesh3dConfig, Mesh3dState, Mesh3dWidget};
+//!
+//! # fn draw(frame: &mut ratatui::Frame<'_>, area: ratatui::layout::Rect) -> ratatui_3dmesh::Result<()> {
+//! let mesh = Mesh::load("model.obj")?;
+//! let config = Mesh3dConfig::default().auto_fit(true);
+//! let mut state = Mesh3dState::default();
+//! frame.render_stateful_widget(Mesh3dWidget::new(&mesh).config(config), area, &mut state);
+//! # Ok(())
+//! # }
+//! ```
+
+pub mod config;
+#[cfg(feature = "cli-example")]
+pub mod controls;
+pub mod error;
+pub mod loader;
+pub mod model;
+pub mod render;
+pub mod widget;
+
+pub use config::{ColorMode, Mesh3dConfig, ProjectionMode, RenderMode};
+#[cfg(feature = "cli-example")]
+pub use controls::{ControlAction, ControlMap};
+pub use error::{Error, Result};
+pub use model::{Bounds, Face, Material, Mesh, Vec3};
+pub use widget::{Mesh3dState, Mesh3dWidget};
