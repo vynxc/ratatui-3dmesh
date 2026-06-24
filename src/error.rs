@@ -19,7 +19,7 @@ pub enum Error {
 
     /// The file extension is not enabled or not supported.
     #[error(
-        "unsupported mesh format for {path}; expected .obj or .stl with matching features enabled"
+        "unsupported mesh format for {path}; expected .obj, .stl, .gltf, or .glb with matching features enabled"
     )]
     UnsupportedFormat {
         /// Path that could not be loaded.

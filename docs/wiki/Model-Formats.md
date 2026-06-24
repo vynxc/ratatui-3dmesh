@@ -51,6 +51,26 @@ cargo run --release --example viewer --features "cli-example textures" -- \
   models/model.obj --texture models/AXEE_LP_exported_Base_color.jpg
 ```
 
+## glTF / GLB
+
+The optional `gltf` feature enables `.gltf` and `.glb` loading.
+
+Supported:
+
+- Mesh primitives and triangle indices
+- Node transforms
+- Vertex positions, normals, and UV set 0
+- PBR base-color factors as material diffuse colors
+- PBR base-color textures when `textures` is also enabled
+
+Example:
+
+```bash
+cargo run --release --example viewer --features "cli-example gltf textures" -- \
+  models/axe/scene.gltf
+```
+
+
 ## STL
 
 Supported:

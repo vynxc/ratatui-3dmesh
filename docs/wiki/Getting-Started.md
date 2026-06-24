@@ -19,6 +19,13 @@ Enable texture images:
 ratatui-3dmesh = { version = "0.1", features = ["textures"] }
 ```
 
+
+Enable glTF/GLB loading:
+
+```toml
+ratatui-3dmesh = { version = "0.1", features = ["gltf"] }
+```
+
 ## Run the bundled viewer
 
 ```bash
@@ -31,6 +38,14 @@ Run a textured OBJ in release mode:
 ```bash
 cargo run --release --example viewer --features "cli-example textures" -- \
   models/model.obj --texture models/AXEE_LP_exported_Base_color.jpg
+```
+
+
+Run the axe glTF asset in release mode:
+
+```bash
+cargo run --release --example viewer --features "cli-example gltf textures" -- \
+  models/axe/scene.gltf
 ```
 
 The `--texture` flag is useful when an OBJ has UVs but no usable MTL file. OBJ + MTL + `map_Kd` textures can load without `--texture` when `load_material_textures` is enabled by the example.
