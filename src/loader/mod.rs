@@ -2,6 +2,9 @@ use std::path::{Path, PathBuf};
 
 use crate::{model::Mesh, Error, Result};
 
+#[cfg(feature = "gltf")]
+pub mod gltf;
+
 #[cfg(feature = "mtl")]
 pub mod mtl;
 #[cfg(feature = "obj")]
@@ -60,6 +63,8 @@ pub fn load_with_options(path: &Path, options: &MeshLoadOptions) -> Result<Mesh>
         .unwrap_or_default()
         .to_ascii_lowercase();
     match ext.as_str() {
+        #[cfg(feature = "gltf")]
+        "gltf" | "glb" => gltf::load_gltf(path, options),
         #[cfg(feature = "obj")]
         "obj" => obj::load_obj_with_options(path, options),
         #[cfg(feature = "stl")]

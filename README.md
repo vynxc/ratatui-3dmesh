@@ -9,7 +9,7 @@ A reusable [Ratatui](https://ratatui.rs/) widget for viewing 3D meshes as shaded
 
 This crate is built for embedding. Your app owns terminal initialization, layout, and event loops; this crate provides mesh loading, configuration, rendering, state, and optional crossterm controls.
 
-> Status: early public crate. OBJ/STL/MTL, UV parsing, optional texture images, solid/wire/point modes, color policies, controls, docs, and an example viewer are included.
+> Status: early public crate. OBJ/STL/glTF/MTL, UV parsing, optional texture images, solid/wire/point modes, color policies, controls, docs, and an example viewer are included.
 
 ## Install
 
@@ -30,6 +30,13 @@ For PNG/JPEG texture images:
 ```toml
 ratatui-3dmesh = { version = "0.1", features = ["textures"] }
 ```
+
+For glTF/GLB loading:
+
+```toml
+ratatui-3dmesh = { version = "0.1", features = ["gltf"] }
+```
+
 
 ## Use as a Ratatui widget
 
@@ -81,6 +88,18 @@ let mesh = Mesh::load_with_options(
 
 The texture loader sniffs image bytes instead of trusting the extension, so a PNG file named `.jpg` can still decode.
 
+
+## glTF usage
+
+glTF support is available through the optional `gltf` feature. The loader reads `.gltf`/`.glb` mesh primitives, indices, normals, UVs, base-color factors, and base-color textures when `textures` is also enabled.
+
+Run the axe asset:
+
+```bash
+cargo run --release --example viewer --features "cli-example gltf textures" -- \
+  models/axe/scene.gltf
+```
+
 ## Run the example viewer
 
 ```bash
@@ -94,6 +113,10 @@ Run with texture support:
 ```bash
 cargo run --release --example viewer --features "cli-example textures" -- \
   models/model.obj --texture models/AXEE_LP_exported_Base_color.jpg
+
+
+cargo run --release --example viewer --features "cli-example gltf textures" -- \
+  models/axe/scene.gltf
 ```
 
 Controls:
@@ -118,9 +141,10 @@ Controls:
 | OBJ | vertices, texture coordinates, normals, polygon faces, negative indices, `usemtl`, companion `mtllib` |
 | MTL | `newmtl`, diffuse `Kd` colors, diffuse `map_Kd` texture paths |
 | Textures | optional PNG/JPEG decode to RGBA8 via the `textures` feature; manual `--texture` override supported |
+| glTF/GLB | mesh primitives, indices, normals, UVs, base-color factors, base-color textures with `gltf` + `textures` |
 | STL | ASCII STL and binary STL |
 
-STL files and OBJ files without UVs continue to render with material/lighting/grayscale modes.
+STL files and OBJ/glTF primitives without UVs continue to render with material/lighting/grayscale modes.
 
 ## Configuration highlights
 
@@ -151,6 +175,7 @@ let pretty = Mesh3dConfig::quality();
 | `obj` | yes | Wavefront OBJ loading |
 | `stl` | yes | ASCII/binary STL loading |
 | `mtl` | yes | OBJ material diffuse-color and `map_Kd` metadata loading |
+| `gltf` | no | glTF/GLB mesh, material, UV, and base-color texture loading |
 | `textures` | no | PNG/JPEG texture image decoding and texture-colored rendering |
 | `serde` | no | serialize/deserialize public config/model/state types where practical |
 | `cli-example` | no | crossterm keyboard control helpers and example support |
