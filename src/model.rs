@@ -293,6 +293,19 @@ impl Texture {
     }
 }
 
+/// How a material's alpha channel is interpreted, mirroring glTF `alphaMode`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum AlphaMode {
+    /// Alpha is ignored; the surface is fully opaque.
+    #[default]
+    Opaque,
+    /// Alpha acts as a hard cutout against [`Material::alpha_cutoff`].
+    Mask,
+    /// Alpha blends the surface over what is behind it.
+    Blend,
+}
+
 /// Diffuse material metadata.
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -303,16 +316,34 @@ pub struct Material {
     pub diffuse: [f32; 3],
     /// Optional diffuse texture map (`map_Kd`).
     pub diffuse_texture: Option<TextureRef>,
+    /// Base-color alpha factor in `[0, 1]`. glTF base-color alpha; `1.0` for OBJ.
+    pub base_color_alpha: f32,
+    /// How alpha is interpreted while rasterizing.
+    pub alpha_mode: AlphaMode,
+    /// Cutoff used when [`Self::alpha_mode`] is [`AlphaMode::Mask`].
+    pub alpha_cutoff: f32,
+    /// Render both faces, ignoring back-face culling (glTF `doubleSided`).
+    pub double_sided: bool,
+    /// Emissive color factor as normalized RGB. `[0, 0, 0]` disables emission.
+    pub emissive: [f32; 3],
+    /// Optional emissive texture map.
+    pub emissive_texture: Option<TextureRef>,
 }
 
 impl Material {
-    /// Create a material with a white diffuse color.
+    /// Create a material with a white diffuse color and opaque, one-sided defaults.
     #[must_use]
     pub fn new(name: impl Into<String>) -> Self {
         Self {
             name: name.into(),
             diffuse: [1.0, 1.0, 1.0],
             diffuse_texture: None,
+            base_color_alpha: 1.0,
+            alpha_mode: AlphaMode::Opaque,
+            alpha_cutoff: 0.5,
+            double_sided: false,
+            emissive: [0.0, 0.0, 0.0],
+            emissive_texture: None,
         }
     }
 
@@ -325,6 +356,12 @@ impl Material {
             (g.clamp(0.0, 1.0) * 255.0).round() as u8,
             (b.clamp(0.0, 1.0) * 255.0).round() as u8,
         )
+    }
+
+    /// Whether the material emits any light (non-zero emissive factor or a map).
+    #[must_use]
+    pub fn is_emissive(&self) -> bool {
+        self.emissive_texture.is_some() || self.emissive.iter().any(|&c| c > 0.0)
     }
 }
 
@@ -402,7 +439,7 @@ pub struct Mesh {
     pub default_texture: Option<TextureRef>,
     /// Whether texture V coordinates should be flipped during sampling.
     pub flip_texture_v: bool,
-    /// Embedded animation clips. glTF/GLB may populate this; OBJ/STL leave it empty.
+    /// Embedded animation clips. glTF/GLB may populate this; OBJ leaves it empty.
     pub animations: Vec<AnimationClip>,
     /// Scene-node metadata for applying animation to flattened vertices.
     pub animation_nodes: Vec<AnimationNode>,

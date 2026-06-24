@@ -161,7 +161,7 @@ fn run_app(
 
 fn animation_status(mesh: &Mesh, state: &Mesh3dState) -> String {
     if mesh.animations.is_empty() {
-        return "animation: none (OBJ/STL/static glTF render as static meshes)".to_string();
+        return "animation: none (OBJ and static glTF render as static meshes)".to_string();
     }
     let selected = state
         .selected_animation

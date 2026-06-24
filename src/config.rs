@@ -261,6 +261,12 @@ impl Mesh3dConfig {
     }
 
     #[must_use]
+    pub fn normalize(mut self, enabled: bool) -> Self {
+        self.normalize = enabled;
+        self
+    }
+
+    #[must_use]
     pub fn light_direction(mut self, direction: [f32; 3]) -> Self {
         self.light_direction = direction;
         self

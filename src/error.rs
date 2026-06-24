@@ -19,7 +19,7 @@ pub enum Error {
 
     /// The file extension is not enabled or not supported.
     #[error(
-        "unsupported mesh format for {path}; expected .obj, .stl, .gltf, or .glb with matching features enabled"
+        "unsupported mesh format for {path}; expected .obj, .gltf, or .glb with matching features enabled"
     )]
     UnsupportedFormat {
         /// Path that could not be loaded.
@@ -33,15 +33,6 @@ pub enum Error {
         path: PathBuf,
         /// 1-based line number if known.
         line: Option<usize>,
-        /// Human readable message.
-        message: String,
-    },
-
-    /// Binary STL content was malformed.
-    #[error("invalid binary STL in {path}: {message}")]
-    InvalidBinaryStl {
-        /// File being parsed.
-        path: PathBuf,
         /// Human readable message.
         message: String,
     },

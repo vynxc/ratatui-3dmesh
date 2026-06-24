@@ -25,7 +25,7 @@ With the `cli-example` feature, `ControlMap` can mutate `Mesh3dState` and `Mesh3
 
 ## Animation playback
 
-glTF/GLB files may populate `mesh.animations`; OBJ and STL leave it empty. Embedders can inspect clip metadata, choose a clip on `Mesh3dState`, advance state in their event loop, and render the same `Mesh3dWidget`.
+glTF/GLB files may populate `mesh.animations`; OBJ leaves it empty. Embedders can inspect clip metadata, choose a clip on `Mesh3dState`, advance state in their event loop, and render the same `Mesh3dWidget`.
 
 ```rust,no_run
 use ratatui_3dmesh::{Mesh, Mesh3dConfig, Mesh3dState, Mesh3dWidget};

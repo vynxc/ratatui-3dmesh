@@ -1,9 +1,9 @@
 //! Embeddable Ratatui 3D mesh viewer.
 //!
-//! `ratatui-3dmesh` renders OBJ/STL meshes into a Ratatui [`ratatui::buffer::Buffer`] as shaded
-//! terminal glyphs. The library is designed as a reusable widget: your app owns
-//! terminal setup, event loops, and layout, while this crate owns mesh loading,
-//! projection, rasterization, and viewer state.
+//! `ratatui-3dmesh` renders OBJ and glTF/GLB meshes into a Ratatui
+//! [`ratatui::buffer::Buffer`] as shaded terminal glyphs. The library is designed as a
+//! reusable widget: your app owns terminal setup, event loops, and layout, while this
+//! crate owns mesh loading, projection, rasterization, and viewer state.
 //!
 //! # Quick start
 //!
@@ -39,5 +39,5 @@ pub use config::{ColorMode, Mesh3dConfig, ProjectionMode, RenderMode, TextureFil
 pub use controls::{ControlAction, ControlMap};
 pub use error::{Error, Result};
 pub use loader::MeshLoadOptions;
-pub use model::{Bounds, Face, Material, Mesh, Texture, TextureRef, Vec2, Vec3};
+pub use model::{AlphaMode, Bounds, Face, Material, Mesh, Texture, TextureRef, Vec2, Vec3};
 pub use widget::{Mesh3dState, Mesh3dWidget};

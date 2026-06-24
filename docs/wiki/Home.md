@@ -1,6 +1,6 @@
 # Home
 
-`ratatui-3dmesh` is an embeddable Ratatui widget for rendering 3D OBJ/STL meshes as terminal ASCII.
+`ratatui-3dmesh` is an embeddable Ratatui widget for rendering 3D OBJ and glTF/GLB meshes as terminal ASCII.
 
 ## Quick links
 
@@ -14,5 +14,5 @@
 
 - Work as a widget inside existing Ratatui apps.
 - Provide good defaults and many typed customization options.
-- Support OBJ, STL, and MTL diffuse material colors.
+- Support OBJ (with companion MTL) and glTF/GLB, including PBR material semantics.
 - Keep terminal initialization outside the library.
