@@ -6,12 +6,20 @@ use crate::{
 };
 
 /// Load Wavefront MTL diffuse materials from disk.
+///
+/// # Errors
+///
+/// Returns an error when the file cannot be read or contains malformed supported material statements.
 pub fn load_mtl(path: &Path) -> Result<Vec<Material>> {
     let text = fs::read_to_string(path).map_err(|err| Error::io(path, err))?;
     parse_mtl(path, &text)
 }
 
 /// Parse Wavefront MTL content.
+///
+/// # Errors
+///
+/// Returns an error when supported statements such as `newmtl` or `Kd` are malformed.
 pub fn parse_mtl(path: &Path, text: &str) -> Result<Vec<Material>> {
     let mut materials = Vec::new();
     let mut current: Option<Material> = None;

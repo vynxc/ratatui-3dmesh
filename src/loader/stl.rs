@@ -6,12 +6,20 @@ use crate::{
 };
 
 /// Load an ASCII or binary STL mesh.
+///
+/// # Errors
+///
+/// Returns an error when the file cannot be read or the STL data is malformed.
 pub fn load_stl(path: &Path) -> Result<Mesh> {
     let bytes = fs::read(path).map_err(|err| Error::io(path, err))?;
     parse_stl(path, &bytes)
 }
 
 /// Parse STL bytes, auto-detecting binary vs ASCII.
+///
+/// # Errors
+///
+/// Returns an error when the bytes are neither valid binary STL nor valid ASCII STL.
 pub fn parse_stl(path: &Path, bytes: &[u8]) -> Result<Mesh> {
     if looks_like_binary_stl(bytes) {
         parse_binary_stl(path, bytes)
@@ -36,6 +44,10 @@ fn looks_like_binary_stl(bytes: &[u8]) -> bool {
 }
 
 /// Parse binary STL.
+///
+/// # Errors
+///
+/// Returns an error when the binary header or triangle data is truncated or invalid.
 pub fn parse_binary_stl(path: &Path, bytes: &[u8]) -> Result<Mesh> {
     if bytes.len() < 84 {
         return Err(Error::InvalidBinaryStl {
@@ -87,6 +99,10 @@ fn read_vec3(bytes: &[u8], offset: usize) -> Vec3 {
 }
 
 /// Parse ASCII STL.
+///
+/// # Errors
+///
+/// Returns an error when facet normals or vertices are missing or malformed.
 pub fn parse_ascii_stl(path: &Path, text: &str) -> Result<Mesh> {
     let mut vertices = Vec::new();
     let mut faces = Vec::new();

@@ -1,8 +1,4 @@
-use ratatui::{
-    buffer::Buffer,
-    layout::Rect,
-    style::{Color, Style},
-};
+use ratatui::{buffer::Buffer, layout::Rect, style::Color};
 
 use crate::{
     config::{ColorMode, Mesh3dConfig, RenderMode, TextureFilter},
@@ -12,6 +8,7 @@ use crate::{
 
 use super::{
     camera::{project, ProjectedVertex},
+    color::{luminance, style_for, texture_rgb},
     raster::{draw_line, fill_triangle, fill_triangle_with, plot},
 };
 
@@ -104,7 +101,12 @@ pub fn render_mesh(
                 None
             };
             let ch = config.glyph_for_intensity(intensity);
-            let style = style_for(material, textured.as_ref(), intensity, config);
+            let style = style_for(
+                material,
+                textured.as_ref().map(|(texture, _)| *texture),
+                intensity,
+                config,
+            );
             match config.render_mode {
                 RenderMode::Solid => {
                     if let Some((texture, uvs)) = textured {
@@ -194,22 +196,8 @@ fn fill_textured_triangle(
             }
             TextureFilter::Bilinear => sample_bilinear(textured.texture, uv, config),
         };
-        let lighting = if config.texture_lighting {
-            textured.intensity
-        } else {
-            1.0
-        };
-        let rgb = brighten_rgb(
-            [
-                (f32::from(rgba[0]) * lighting).round().clamp(0.0, 255.0) as u8,
-                (f32::from(rgba[1]) * lighting).round().clamp(0.0, 255.0) as u8,
-                (f32::from(rgba[2]) * lighting).round().clamp(0.0, 255.0) as u8,
-            ],
-            config.color_brightness,
-        );
-        let luminance =
-            (0.2126 * f32::from(rgb[0]) + 0.7152 * f32::from(rgb[1]) + 0.0722 * f32::from(rgb[2]))
-                / 255.0;
+        let rgb = texture_rgb(rgba, textured.intensity, config);
+        let luminance = luminance(rgb);
         let ch = config.glyph_for_intensity(if config.texture_lighting {
             luminance.max(textured.intensity * 0.35)
         } else {
@@ -258,82 +246,6 @@ fn sample_bilinear(texture: &Texture, uv: Vec2, config: &Mesh3dConfig) -> [u8; 4
         out[i] = (a * (1.0 - ty) + b * ty).round().clamp(0.0, 255.0) as u8;
     }
     out
-}
-
-fn style_for(
-    material: Option<&Material>,
-    textured: Option<&(&Texture, [Vec2; 3])>,
-    intensity: f32,
-    config: &Mesh3dConfig,
-) -> Style {
-    match config.color_mode {
-        ColorMode::Off => config.foreground_style,
-        ColorMode::Material => material.map_or(config.foreground_style, |m| {
-            config
-                .foreground_style
-                .fg(brighten_color(m.color(), config.color_brightness))
-        }),
-        ColorMode::Texture => textured.map_or_else(
-            || config.foreground_style,
-            |(texture, _)| {
-                let [r, g, b] = texture.average_color();
-                config.foreground_style.fg(Color::Rgb(
-                    brighten_channel(r, config.color_brightness),
-                    brighten_channel(g, config.color_brightness),
-                    brighten_channel(b, config.color_brightness),
-                ))
-            },
-        ),
-        ColorMode::Auto => textured
-            .map(|(texture, _)| {
-                let [r, g, b] = texture.average_color();
-                config.foreground_style.fg(Color::Rgb(
-                    brighten_channel(r, config.color_brightness),
-                    brighten_channel(g, config.color_brightness),
-                    brighten_channel(b, config.color_brightness),
-                ))
-            })
-            .or_else(|| {
-                material.map(|m| {
-                    config
-                        .foreground_style
-                        .fg(brighten_color(m.color(), config.color_brightness))
-                })
-            })
-            .unwrap_or(config.foreground_style),
-        ColorMode::Lighting => {
-            let v = brighten_channel(
-                (intensity.clamp(0.0, 1.0) * 255.0).round() as u8,
-                config.color_brightness,
-            );
-            config.foreground_style.fg(Color::Rgb(v, v, v))
-        }
-    }
-}
-
-fn brighten_color(color: Color, brightness: f32) -> Color {
-    match color {
-        Color::Rgb(r, g, b) => Color::Rgb(
-            brighten_channel(r, brightness),
-            brighten_channel(g, brightness),
-            brighten_channel(b, brightness),
-        ),
-        color => color,
-    }
-}
-
-fn brighten_rgb(rgb: [u8; 3], brightness: f32) -> [u8; 3] {
-    [
-        brighten_channel(rgb[0], brightness),
-        brighten_channel(rgb[1], brightness),
-        brighten_channel(rgb[2], brightness),
-    ]
-}
-
-fn brighten_channel(value: u8, brightness: f32) -> u8 {
-    (f32::from(value) * brightness.clamp(0.0, 8.0))
-        .round()
-        .clamp(0.0, 255.0) as u8
 }
 
 #[allow(dead_code)]

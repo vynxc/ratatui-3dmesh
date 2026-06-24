@@ -108,11 +108,11 @@ impl ControlMap {
                 state.pan(Vec3::new(0.0, self.pan_step * fast, 0.0));
                 Some(ControlAction::Pan)
             }
-            KeyCode::Char('+') | KeyCode::Char('=') => {
+            KeyCode::Char('+' | '=') => {
                 state.zoom_by(self.zoom_in_factor);
                 Some(ControlAction::Zoom)
             }
-            KeyCode::Char('-') | KeyCode::Char('_') => {
+            KeyCode::Char('-' | '_') => {
                 state.zoom_by(self.zoom_out_factor);
                 Some(ControlAction::Zoom)
             }

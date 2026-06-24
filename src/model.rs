@@ -399,6 +399,10 @@ pub struct Mesh {
 
 impl Mesh {
     /// Build a mesh from parts and compute bounds.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::EmptyMesh`] when vertices or faces are empty.
     pub fn new(
         name: impl Into<String>,
         vertices: Vec<Vec3>,
@@ -409,6 +413,10 @@ impl Mesh {
     }
 
     /// Build a mesh with OBJ attributes and compute bounds.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::EmptyMesh`] when vertices or faces are empty.
     pub fn with_attributes(
         name: impl Into<String>,
         vertices: Vec<Vec3>,
@@ -434,12 +442,20 @@ impl Mesh {
         })
     }
 
-    /// Load a mesh from `.obj` or `.stl`, using enabled format features.
+    /// Load a mesh from a path, using enabled format features.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when loading, parsing, or format dispatch fails.
     pub fn load(path: impl AsRef<Path>) -> Result<Self> {
         loader::load(path.as_ref())
     }
 
     /// Load a mesh with extra loader options such as texture override.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when loading, parsing, format dispatch, or strict companion asset loading fails.
     pub fn load_with_options(
         path: impl AsRef<Path>,
         options: loader::MeshLoadOptions,
@@ -448,6 +464,10 @@ impl Mesh {
     }
 
     /// Load a mesh and attach a texture for OBJ files with UVs but no MTL.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when mesh loading fails or strict texture decoding fails.
     #[cfg(feature = "textures")]
     pub fn load_textured(path: impl AsRef<Path>, texture_path: impl AsRef<Path>) -> Result<Self> {
         Self::load_with_options(
