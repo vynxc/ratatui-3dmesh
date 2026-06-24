@@ -3,12 +3,20 @@ use std::{fs, path::Path};
 use crate::{model::Texture, Error, Result};
 
 /// Load an image texture from disk, sniffing the image format from bytes.
+///
+/// # Errors
+///
+/// Returns an error when the file cannot be read or the image decoder cannot identify/decode it.
 pub fn load_texture(path: &Path) -> Result<Texture> {
     let bytes = fs::read(path).map_err(|err| Error::io(path, err))?;
     decode_texture(path, &bytes)
 }
 
 /// Decode image bytes into RGBA8 texture data.
+///
+/// # Errors
+///
+/// Returns an error when the image format is unknown or decoding fails.
 pub fn decode_texture(path: &Path, bytes: &[u8]) -> Result<Texture> {
     let format = image::guess_format(bytes)
         .map_err(|err| Error::texture_decode(path, format!("unknown image format: {err}")))?;

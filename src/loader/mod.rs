@@ -49,11 +49,19 @@ impl MeshLoadOptions {
 }
 
 /// Load a mesh by file extension.
+///
+/// # Errors
+///
+/// Returns an error when the file extension is unsupported or the selected loader cannot read or parse the mesh.
 pub fn load(path: &Path) -> Result<Mesh> {
     load_with_options(path, &MeshLoadOptions::default())
 }
 
 /// Load a mesh by file extension with loader options.
+///
+/// # Errors
+///
+/// Returns an error when the file extension is unsupported or the selected loader cannot read the mesh or companion assets.
 pub fn load_with_options(path: &Path, options: &MeshLoadOptions) -> Result<Mesh> {
     #[cfg(not(feature = "obj"))]
     let _ = options;

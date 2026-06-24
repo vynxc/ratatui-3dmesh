@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::{
     loader::MeshLoadOptions,
@@ -10,6 +10,11 @@ use crate::{
 use crate::model::Texture;
 
 /// Load a glTF/GLB mesh.
+///
+/// # Errors
+///
+/// Returns an error when the glTF document cannot be imported, decoded texture data uses an
+/// unsupported format, or the resulting mesh geometry is invalid.
 pub fn load_gltf(path: &Path, options: &MeshLoadOptions) -> Result<Mesh> {
     let (document, buffers, images) = gltf::import(path).map_err(|err| {
         Error::parse(
@@ -19,110 +24,11 @@ pub fn load_gltf(path: &Path, options: &MeshLoadOptions) -> Result<Mesh> {
         )
     })?;
 
-    let mut materials = document
-        .materials()
-        .enumerate()
-        .map(|(index, material)| {
-            let mut m = Material::new(
-                material
-                    .name()
-                    .map(ToOwned::to_owned)
-                    .unwrap_or_else(|| format!("material_{index}")),
-            );
-            let pbr = material.pbr_metallic_roughness();
-            let [r, g, b, _a] = pbr.base_color_factor();
-            m.diffuse = [r, g, b];
-            if let Some(info) = pbr.base_color_texture() {
-                let source = info.texture().source();
-                m.diffuse_texture = Some(TextureRef {
-                    path: image_path(path, source.index(), image_uri(source.source())),
-                    index: Some(source.index()),
-                });
-            }
-            m
-        })
-        .collect::<Vec<_>>();
-
-    let mut vertices = Vec::new();
-    let mut tex_coords = Vec::new();
-    let mut normals = Vec::new();
-    let mut faces = Vec::new();
-
-    for node in document.nodes() {
-        let transform = node.transform().matrix();
-        let Some(mesh) = node.mesh() else {
-            continue;
-        };
-        for primitive in mesh.primitives() {
-            let reader = primitive.reader(|buffer| Some(&buffers[buffer.index()].0));
-            let Some(positions) = reader.read_positions() else {
-                continue;
-            };
-            let base_vertex = vertices.len();
-            let base_uv = tex_coords.len();
-            let base_normal = normals.len();
-            let positions = positions.collect::<Vec<_>>();
-            for position in &positions {
-                vertices.push(transform_point(transform, *position));
-            }
-            let uvs = reader
-                .read_tex_coords(0)
-                .map(|coords| coords.into_f32().collect::<Vec<_>>())
-                .unwrap_or_default();
-            for uv in &uvs {
-                tex_coords.push(Vec2::new(uv[0], uv[1]));
-            }
-            let read_normals = reader
-                .read_normals()
-                .map(|items| items.collect::<Vec<_>>())
-                .unwrap_or_default();
-            for normal in &read_normals {
-                normals.push(transform_normal(transform, *normal));
-            }
-
-            let material_name = primitive
-                .material()
-                .index()
-                .and_then(|idx| materials.get(idx).map(|material| material.name.clone()));
-            let source_indices = reader
-                .read_indices()
-                .map(|indices| indices.into_u32().collect::<Vec<_>>())
-                .unwrap_or_else(|| (0..positions.len() as u32).collect());
-            for tri in source_indices.chunks_exact(3) {
-                let local = [tri[0] as usize, tri[1] as usize, tri[2] as usize];
-                if local.iter().any(|&idx| idx >= positions.len()) {
-                    continue;
-                }
-                let mut face = Face::with_attributes(
-                    local.iter().map(|idx| base_vertex + idx).collect(),
-                    local
-                        .iter()
-                        .map(|&idx| (idx < uvs.len()).then_some(base_uv + idx))
-                        .collect(),
-                    local
-                        .iter()
-                        .map(|&idx| (idx < read_normals.len()).then_some(base_normal + idx))
-                        .collect(),
-                );
-                face.material = material_name.clone();
-                face.normal = local.iter().find_map(|&idx| {
-                    (idx < read_normals.len()).then_some(normals[base_normal + idx])
-                });
-                faces.push(face);
-            }
-        }
-    }
+    let mut materials = collect_materials(path, &document);
+    let geometry = collect_geometry(&document, &buffers, &materials);
 
     #[cfg(feature = "textures")]
-    let textures = if options.load_material_textures {
-        images
-            .iter()
-            .enumerate()
-            .map(|(index, image)| gltf_image_to_texture(path, index, image))
-            .collect::<Result<Vec<_>>>()?
-    } else {
-        Vec::new()
-    };
+    let textures = load_textures(path, options, &images)?;
 
     #[cfg(not(feature = "textures"))]
     let _ = (images, options);
@@ -133,16 +39,186 @@ pub fn load_gltf(path: &Path, options: &MeshLoadOptions) -> Result<Mesh> {
 
     let name = path
         .file_name()
-        .and_then(|s| s.to_str())
+        .and_then(|name| name.to_str())
         .unwrap_or("gltf mesh");
-    let mesh = Mesh::with_attributes(name, vertices, tex_coords, normals, faces, materials)?;
+    let mesh = Mesh::with_attributes(
+        name,
+        geometry.vertices,
+        geometry.tex_coords,
+        geometry.normals,
+        geometry.faces,
+        materials,
+    )?;
+
     #[cfg(feature = "textures")]
     let mesh = {
         let mut mesh = mesh;
         mesh.textures = textures;
         mesh
     };
+
     Ok(mesh)
+}
+
+#[derive(Default)]
+struct GeometryParts {
+    vertices: Vec<Vec3>,
+    tex_coords: Vec<Vec2>,
+    normals: Vec<Vec3>,
+    faces: Vec<Face>,
+}
+
+fn collect_materials(path: &Path, document: &gltf::Document) -> Vec<Material> {
+    document
+        .materials()
+        .enumerate()
+        .map(|(index, material)| {
+            let name = material
+                .name()
+                .map_or_else(|| format!("material_{index}"), ToOwned::to_owned);
+            let mut output = Material::new(name);
+            let pbr = material.pbr_metallic_roughness();
+            let [red, green, blue, _alpha] = pbr.base_color_factor();
+            output.diffuse = [red, green, blue];
+            if let Some(info) = pbr.base_color_texture() {
+                let source = info.texture().source();
+                output.diffuse_texture = Some(TextureRef {
+                    path: image_path(path, source.index(), image_uri(source.source())),
+                    index: Some(source.index()),
+                });
+            }
+            output
+        })
+        .collect()
+}
+
+fn collect_geometry(
+    document: &gltf::Document,
+    buffers: &[gltf::buffer::Data],
+    materials: &[Material],
+) -> GeometryParts {
+    let mut geometry = GeometryParts::default();
+    for node in document.nodes() {
+        let transform = node.transform().matrix();
+        let Some(mesh) = node.mesh() else {
+            continue;
+        };
+        for primitive in mesh.primitives() {
+            append_primitive(&mut geometry, transform, &primitive, buffers, materials);
+        }
+    }
+    geometry
+}
+
+fn append_primitive(
+    geometry: &mut GeometryParts,
+    transform: [[f32; 4]; 4],
+    primitive: &gltf::Primitive<'_>,
+    buffers: &[gltf::buffer::Data],
+    materials: &[Material],
+) {
+    let reader = primitive.reader(|buffer| Some(&buffers[buffer.index()].0));
+    let Some(positions) = reader.read_positions() else {
+        return;
+    };
+
+    let base_vertex = geometry.vertices.len();
+    let base_uv = geometry.tex_coords.len();
+    let base_normal = geometry.normals.len();
+    let positions = positions.collect::<Vec<_>>();
+
+    geometry.vertices.extend(
+        positions
+            .iter()
+            .map(|&position| transform_point(transform, position)),
+    );
+
+    let uvs = reader
+        .read_tex_coords(0)
+        .map_or_else(Vec::new, |coords| coords.into_f32().collect::<Vec<_>>());
+    geometry
+        .tex_coords
+        .extend(uvs.iter().map(|uv| Vec2::new(uv[0], uv[1])));
+
+    let read_normals = reader
+        .read_normals()
+        .map_or_else(Vec::new, Iterator::collect);
+    geometry.normals.extend(
+        read_normals
+            .iter()
+            .map(|&normal| transform_normal(transform, normal)),
+    );
+
+    let material_name = primitive
+        .material()
+        .index()
+        .and_then(|idx| materials.get(idx).map(|material| material.name.clone()));
+    let source_indices = reader.read_indices().map_or_else(
+        || indices_for_positions(positions.len()),
+        |indices| indices.into_u32().collect::<Vec<_>>(),
+    );
+
+    for tri in source_indices.chunks_exact(3) {
+        let local = [tri[0] as usize, tri[1] as usize, tri[2] as usize];
+        if local.iter().any(|&idx| idx >= positions.len()) {
+            continue;
+        }
+        let attributes = PrimitiveFaceAttributes {
+            base_vertex,
+            base_uv,
+            base_normal,
+            uvs: &uvs,
+            read_normals: &read_normals,
+            normals: &geometry.normals,
+        };
+        geometry
+            .faces
+            .push(build_face(local, &attributes, material_name.clone()));
+    }
+}
+
+struct PrimitiveFaceAttributes<'a> {
+    base_vertex: usize,
+    base_uv: usize,
+    base_normal: usize,
+    uvs: &'a [[f32; 2]],
+    read_normals: &'a [[f32; 3]],
+    normals: &'a [Vec3],
+}
+
+fn build_face(
+    local: [usize; 3],
+    attributes: &PrimitiveFaceAttributes<'_>,
+    material_name: Option<String>,
+) -> Face {
+    let mut face = Face::with_attributes(
+        local
+            .iter()
+            .map(|idx| attributes.base_vertex + idx)
+            .collect(),
+        local
+            .iter()
+            .map(|&idx| (idx < attributes.uvs.len()).then_some(attributes.base_uv + idx))
+            .collect(),
+        local
+            .iter()
+            .map(|&idx| {
+                (idx < attributes.read_normals.len()).then_some(attributes.base_normal + idx)
+            })
+            .collect(),
+    );
+    face.material = material_name;
+    face.normal = local.iter().find_map(|&idx| {
+        (idx < attributes.read_normals.len())
+            .then_some(attributes.normals[attributes.base_normal + idx])
+    });
+    face
+}
+
+fn indices_for_positions(len: usize) -> Vec<u32> {
+    (0..len)
+        .filter_map(|index| u32::try_from(index).ok())
+        .collect()
 }
 
 fn image_uri(source: gltf::image::Source<'_>) -> Option<&str> {
@@ -152,9 +228,11 @@ fn image_uri(source: gltf::image::Source<'_>) -> Option<&str> {
     }
 }
 
-fn image_path(path: &Path, index: usize, uri: Option<&str>) -> std::path::PathBuf {
-    uri.map(|uri| path.parent().unwrap_or_else(|| Path::new(".")).join(uri))
-        .unwrap_or_else(|| std::path::PathBuf::from(format!("gltf-image-{index}")))
+fn image_path(path: &Path, index: usize, uri: Option<&str>) -> PathBuf {
+    uri.map_or_else(
+        || PathBuf::from(format!("gltf-image-{index}")),
+        |uri| path.parent().unwrap_or_else(|| Path::new(".")).join(uri),
+    )
 }
 
 fn transform_point(matrix: [[f32; 4]; 4], point: [f32; 3]) -> Vec3 {
@@ -190,6 +268,23 @@ fn transform_normal(matrix: [[f32; 4]; 4], normal: [f32; 3]) -> Vec3 {
         ),
     )
     .normalized()
+}
+
+#[cfg(feature = "textures")]
+fn load_textures(
+    path: &Path,
+    options: &MeshLoadOptions,
+    images: &[gltf::image::Data],
+) -> Result<Vec<Texture>> {
+    if options.load_material_textures {
+        images
+            .iter()
+            .enumerate()
+            .map(|(index, image)| gltf_image_to_texture(path, index, image))
+            .collect()
+    } else {
+        Ok(Vec::new())
+    }
 }
 
 #[cfg(feature = "textures")]

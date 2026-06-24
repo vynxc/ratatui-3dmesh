@@ -12,11 +12,19 @@ use super::mtl;
 use super::texture;
 
 /// Load a Wavefront OBJ mesh.
+///
+/// # Errors
+///
+/// Returns an error when the file cannot be read or valid OBJ geometry cannot be parsed.
 pub fn load_obj(path: &Path) -> Result<Mesh> {
     load_obj_with_options(path, &MeshLoadOptions::default())
 }
 
 /// Load a Wavefront OBJ mesh with loader options.
+///
+/// # Errors
+///
+/// Returns an error when the OBJ cannot be read or parsed, or when strict texture loading fails.
 pub fn load_obj_with_options(path: &Path, options: &MeshLoadOptions) -> Result<Mesh> {
     let text = fs::read_to_string(path).map_err(|err| Error::io(path, err))?;
     let mut mesh = parse_obj(path, &text)?;
@@ -25,6 +33,10 @@ pub fn load_obj_with_options(path: &Path, options: &MeshLoadOptions) -> Result<M
 }
 
 /// Parse a Wavefront OBJ mesh from text.
+///
+/// # Errors
+///
+/// Returns an error when required vertex/face data is missing or malformed.
 pub fn parse_obj(path: &Path, text: &str) -> Result<Mesh> {
     let mut vertices = Vec::new();
     let mut tex_coords = Vec::new();
@@ -114,7 +126,7 @@ pub fn parse_obj(path: &Path, text: &str) -> Result<Mesh> {
                     ));
                 }
                 let mut face = Face::with_attributes(indices, tex_coord_indices, normal_indices);
-                face.material = current_material.clone();
+                face.material.clone_from(&current_material);
                 face.normal = face
                     .normal_indices
                     .iter()
@@ -227,14 +239,16 @@ fn parse_obj_index(
 }
 
 fn obj_index_to_zero_based(index: isize, count: usize) -> Option<usize> {
-    if index > 0 {
-        let idx = usize::try_from(index - 1).ok()?;
-        (idx < count).then_some(idx)
-    } else if index < 0 {
-        let idx = isize::try_from(count).ok()?.checked_add(index)?;
-        (idx >= 0).then_some(idx as usize)
-    } else {
-        None
+    match index.cmp(&0) {
+        std::cmp::Ordering::Greater => {
+            let idx = usize::try_from(index - 1).ok()?;
+            (idx < count).then_some(idx)
+        }
+        std::cmp::Ordering::Less => {
+            let idx = isize::try_from(count).ok()?.checked_add(index)?;
+            usize::try_from(idx).ok()
+        }
+        std::cmp::Ordering::Equal => None,
     }
 }
 
