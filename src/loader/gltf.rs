@@ -1,6 +1,12 @@
 use std::path::{Path, PathBuf};
 
 use crate::{
+    animation::{
+        identity_matrix, multiply_matrix, transform_normal as animation_transform_normal,
+        transform_point as animation_transform_point, AnimatedProperty, AnimationChannel,
+        AnimationClip, AnimationNode, AnimationSampler, AnimationValue, Interpolation, MeshRange,
+        NodeTransform, Quaternion, SkinBinding, SkinnedVertex,
+    },
     loader::MeshLoadOptions,
     model::{Face, Material, Mesh, TextureRef, Vec2, Vec3},
     Error, Result,
@@ -26,6 +32,7 @@ pub fn load_gltf(path: &Path, options: &MeshLoadOptions) -> Result<Mesh> {
 
     let mut materials = collect_materials(path, &document);
     let geometry = collect_geometry(&document, &buffers, &materials);
+    let animations = collect_animations(&document, &buffers);
 
     #[cfg(feature = "textures")]
     let textures = load_textures(path, options, &images)?;
@@ -41,7 +48,7 @@ pub fn load_gltf(path: &Path, options: &MeshLoadOptions) -> Result<Mesh> {
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or("gltf mesh");
-    let mesh = Mesh::with_attributes(
+    let mut mesh = Mesh::with_attributes(
         name,
         geometry.vertices,
         geometry.tex_coords,
@@ -49,6 +56,12 @@ pub fn load_gltf(path: &Path, options: &MeshLoadOptions) -> Result<Mesh> {
         geometry.faces,
         materials,
     )?;
+    mesh.bind_vertices = geometry.bind_vertices;
+    mesh.bind_normals = geometry.bind_normals;
+    mesh.animation_nodes = geometry.animation_nodes;
+    mesh.skins = geometry.skins;
+    mesh.animations = animations;
+    mesh.flip_texture_v = false;
 
     #[cfg(feature = "textures")]
     let mesh = {
@@ -63,9 +76,13 @@ pub fn load_gltf(path: &Path, options: &MeshLoadOptions) -> Result<Mesh> {
 #[derive(Default)]
 struct GeometryParts {
     vertices: Vec<Vec3>,
+    bind_vertices: Vec<Vec3>,
     tex_coords: Vec<Vec2>,
     normals: Vec<Vec3>,
+    bind_normals: Vec<Vec3>,
     faces: Vec<Face>,
+    animation_nodes: Vec<AnimationNode>,
+    skins: Vec<SkinBinding>,
 }
 
 fn collect_materials(path: &Path, document: &gltf::Document) -> Vec<Material> {
@@ -97,29 +114,101 @@ fn collect_geometry(
     buffers: &[gltf::buffer::Data],
     materials: &[Material],
 ) -> GeometryParts {
-    let mut geometry = GeometryParts::default();
+    let parents = collect_node_parents(document);
+    let mut geometry = GeometryParts {
+        animation_nodes: document
+            .nodes()
+            .map(|node| {
+                let (translation, rotation, scale) = node.transform().decomposed();
+                AnimationNode {
+                    index: node.index(),
+                    name: node.name().map(ToOwned::to_owned),
+                    parent: parents.get(node.index()).copied().flatten(),
+                    base_transform: NodeTransform::new(
+                        Vec3::new(translation[0], translation[1], translation[2]),
+                        Quaternion::new(rotation[0], rotation[1], rotation[2], rotation[3]),
+                        Vec3::new(scale[0], scale[1], scale[2]),
+                    ),
+                    vertex_ranges: Vec::new(),
+                    normal_ranges: Vec::new(),
+                }
+            })
+            .collect(),
+        ..GeometryParts::default()
+    };
+    let base_transforms = geometry
+        .animation_nodes
+        .iter()
+        .map(|node| (node.index, node.base_transform))
+        .collect::<Vec<_>>();
+    let world_transforms = geometry
+        .animation_nodes
+        .iter()
+        .map(|node| {
+            (
+                node.index,
+                base_global_matrix(node.index, &geometry.animation_nodes, &base_transforms),
+            )
+        })
+        .collect::<Vec<_>>();
+
     for node in document.nodes() {
-        let transform = node.transform().matrix();
+        let transform = world_transforms
+            .iter()
+            .find(|(index, _)| *index == node.index())
+            .map(|(_, matrix)| *matrix)
+            .unwrap_or_else(|| node.transform().matrix());
         let Some(mesh) = node.mesh() else {
             continue;
         };
         for primitive in mesh.primitives() {
-            append_primitive(&mut geometry, transform, &primitive, buffers, materials);
+            let ranges = append_primitive(
+                &mut geometry,
+                transform,
+                node.skin().as_ref(),
+                &primitive,
+                buffers,
+                materials,
+            );
+            if let Some(animation_node) = geometry
+                .animation_nodes
+                .iter_mut()
+                .find(|animation_node| animation_node.index == node.index())
+            {
+                if let Some(vertex_range) = ranges.vertex_range {
+                    animation_node.vertex_ranges.push(vertex_range);
+                }
+                if let Some(normal_range) = ranges.normal_range {
+                    animation_node.normal_ranges.push(normal_range);
+                }
+            }
+            if let Some(skin) = ranges.skin {
+                geometry.skins.push(skin);
+            }
         }
     }
     geometry
 }
 
+#[derive(Default)]
+struct PrimitiveRanges {
+    vertex_range: Option<MeshRange>,
+    normal_range: Option<MeshRange>,
+    skin: Option<SkinBinding>,
+}
+
 fn append_primitive(
     geometry: &mut GeometryParts,
     transform: [[f32; 4]; 4],
+    skin: Option<&gltf::Skin<'_>>,
     primitive: &gltf::Primitive<'_>,
     buffers: &[gltf::buffer::Data],
     materials: &[Material],
-) {
-    let reader = primitive.reader(|buffer| Some(&buffers[buffer.index()].0));
+) -> PrimitiveRanges {
+    let reader =
+        primitive.reader(|buffer| buffers.get(buffer.index()).map(|data| data.0.as_slice()));
     let Some(positions) = reader.read_positions() else {
-        return;
+        return PrimitiveRanges::default();
     };
 
     let base_vertex = geometry.vertices.len();
@@ -127,6 +216,11 @@ fn append_primitive(
     let base_normal = geometry.normals.len();
     let positions = positions.collect::<Vec<_>>();
 
+    geometry.bind_vertices.extend(
+        positions
+            .iter()
+            .map(|position| Vec3::new(position[0], position[1], position[2])),
+    );
     geometry.vertices.extend(
         positions
             .iter()
@@ -143,6 +237,11 @@ fn append_primitive(
     let read_normals = reader
         .read_normals()
         .map_or_else(Vec::new, Iterator::collect);
+    geometry.bind_normals.extend(
+        read_normals
+            .iter()
+            .map(|normal| Vec3::new(normal[0], normal[1], normal[2])),
+    );
     geometry.normals.extend(
         read_normals
             .iter()
@@ -175,6 +274,110 @@ fn append_primitive(
             .faces
             .push(build_face(local, &attributes, material_name.clone()));
     }
+
+    let vertex_range = MeshRange::new(base_vertex, positions.len());
+    let normal_range =
+        (!read_normals.is_empty()).then_some(MeshRange::new(base_normal, read_normals.len()));
+    let skin = skin.and_then(|skin| {
+        let joints = reader
+            .read_joints(0)?
+            .into_u16()
+            .map(|joints| joints.map(usize::from))
+            .collect::<Vec<_>>();
+        let weights = reader.read_weights(0)?.into_f32().collect::<Vec<_>>();
+        build_skin_binding(skin, buffers, vertex_range, normal_range, joints, weights)
+    });
+
+    PrimitiveRanges {
+        vertex_range: Some(vertex_range),
+        normal_range,
+        skin,
+    }
+}
+
+fn collect_node_parents(document: &gltf::Document) -> Vec<Option<usize>> {
+    let mut parents = vec![None; document.nodes().count()];
+    for node in document.nodes() {
+        for child in node.children() {
+            if let Some(parent) = parents.get_mut(child.index()) {
+                *parent = Some(node.index());
+            }
+        }
+    }
+    parents
+}
+
+fn base_global_matrix(
+    node_index: usize,
+    nodes: &[AnimationNode],
+    local_transforms: &[(usize, NodeTransform)],
+) -> [[f32; 4]; 4] {
+    base_global_matrix_inner(node_index, nodes, local_transforms, 0)
+}
+
+fn base_global_matrix_inner(
+    node_index: usize,
+    nodes: &[AnimationNode],
+    local_transforms: &[(usize, NodeTransform)],
+    depth: usize,
+) -> [[f32; 4]; 4] {
+    if depth > nodes.len() {
+        return identity_matrix();
+    }
+    let Some(node) = nodes.iter().find(|node| node.index == node_index) else {
+        return identity_matrix();
+    };
+    let local = local_transforms
+        .iter()
+        .find(|(index, _)| *index == node_index)
+        .map(|(_, transform)| transform.matrix())
+        .unwrap_or_else(|| node.base_transform.matrix());
+    if let Some(parent) = node.parent {
+        multiply_matrix(
+            base_global_matrix_inner(parent, nodes, local_transforms, depth + 1),
+            local,
+        )
+    } else {
+        local
+    }
+}
+
+fn build_skin_binding(
+    skin: &gltf::Skin<'_>,
+    buffers: &[gltf::buffer::Data],
+    vertex_range: MeshRange,
+    normal_range: Option<MeshRange>,
+    joints: Vec<[usize; 4]>,
+    weights: Vec<[f32; 4]>,
+) -> Option<SkinBinding> {
+    if joints.is_empty() || weights.is_empty() {
+        return None;
+    }
+    let joint_nodes = skin.joints().map(|node| node.index()).collect::<Vec<_>>();
+    if joint_nodes.is_empty() {
+        return None;
+    }
+    let mut inverse_bind_matrices = skin
+        .reader(|buffer| buffers.get(buffer.index()).map(|data| data.0.as_slice()))
+        .read_inverse_bind_matrices()
+        .map_or_else(Vec::new, Iterator::collect);
+    if inverse_bind_matrices.len() < joint_nodes.len() {
+        inverse_bind_matrices.resize(joint_nodes.len(), identity_matrix());
+    }
+    let vertices = (0..vertex_range.len)
+        .map(|index| SkinnedVertex {
+            joints: joints.get(index).copied().unwrap_or([0; 4]),
+            weights: weights.get(index).copied().unwrap_or([0.0; 4]),
+        })
+        .collect::<Vec<_>>();
+
+    Some(SkinBinding {
+        vertex_range,
+        normal_range,
+        joint_nodes,
+        inverse_bind_matrices,
+        vertices,
+    })
 }
 
 struct PrimitiveFaceAttributes<'a> {
@@ -210,7 +413,7 @@ fn build_face(
     face.material = material_name;
     face.normal = local.iter().find_map(|&idx| {
         (idx < attributes.read_normals.len())
-            .then_some(attributes.normals[attributes.base_normal + idx])
+            .then(|| attributes.normals[attributes.base_normal + idx])
     });
     face
 }
@@ -236,38 +439,98 @@ fn image_path(path: &Path, index: usize, uri: Option<&str>) -> PathBuf {
 }
 
 fn transform_point(matrix: [[f32; 4]; 4], point: [f32; 3]) -> Vec3 {
-    Vec3::new(
-        matrix[0][0].mul_add(
-            point[0],
-            matrix[1][0].mul_add(point[1], matrix[2][0] * point[2]),
-        ) + matrix[3][0],
-        matrix[0][1].mul_add(
-            point[0],
-            matrix[1][1].mul_add(point[1], matrix[2][1] * point[2]),
-        ) + matrix[3][1],
-        matrix[0][2].mul_add(
-            point[0],
-            matrix[1][2].mul_add(point[1], matrix[2][2] * point[2]),
-        ) + matrix[3][2],
-    )
+    animation_transform_point(matrix, Vec3::new(point[0], point[1], point[2]))
 }
 
 fn transform_normal(matrix: [[f32; 4]; 4], normal: [f32; 3]) -> Vec3 {
-    Vec3::new(
-        matrix[0][0].mul_add(
-            normal[0],
-            matrix[1][0].mul_add(normal[1], matrix[2][0] * normal[2]),
-        ),
-        matrix[0][1].mul_add(
-            normal[0],
-            matrix[1][1].mul_add(normal[1], matrix[2][1] * normal[2]),
-        ),
-        matrix[0][2].mul_add(
-            normal[0],
-            matrix[1][2].mul_add(normal[1], matrix[2][2] * normal[2]),
-        ),
-    )
-    .normalized()
+    animation_transform_normal(matrix, Vec3::new(normal[0], normal[1], normal[2]))
+}
+
+fn collect_animations(
+    document: &gltf::Document,
+    buffers: &[gltf::buffer::Data],
+) -> Vec<AnimationClip> {
+    document
+        .animations()
+        .filter_map(|animation| {
+            let mut duration_seconds = 0.0_f32;
+            let mut channels = Vec::new();
+            for channel in animation.channels() {
+                let Some(imported) = import_channel(&channel, buffers) else {
+                    continue;
+                };
+                duration_seconds = duration_seconds.max(
+                    imported
+                        .sampler
+                        .inputs
+                        .iter()
+                        .copied()
+                        .fold(0.0_f32, f32::max),
+                );
+                channels.push(imported);
+            }
+            if channels.is_empty() {
+                None
+            } else {
+                Some(AnimationClip {
+                    name: animation.name().map_or_else(
+                        || format!("animation_{}", animation.index()),
+                        ToOwned::to_owned,
+                    ),
+                    duration_seconds,
+                    channels,
+                })
+            }
+        })
+        .collect()
+}
+
+fn import_channel(
+    channel: &gltf::animation::Channel<'_>,
+    buffers: &[gltf::buffer::Data],
+) -> Option<AnimationChannel> {
+    let property = match channel.target().property() {
+        gltf::animation::Property::Translation => AnimatedProperty::Translation,
+        gltf::animation::Property::Rotation => AnimatedProperty::Rotation,
+        gltf::animation::Property::Scale => AnimatedProperty::Scale,
+        gltf::animation::Property::MorphTargetWeights => return None,
+    };
+    let interpolation = match channel.sampler().interpolation() {
+        gltf::animation::Interpolation::Linear => Interpolation::Linear,
+        gltf::animation::Interpolation::Step => Interpolation::Step,
+        gltf::animation::Interpolation::CubicSpline => return None,
+    };
+    let reader = channel.reader(|buffer| buffers.get(buffer.index()).map(|data| data.0.as_slice()));
+    let inputs = reader.read_inputs()?.collect::<Vec<_>>();
+    let outputs: Vec<AnimationValue> = match reader.read_outputs()? {
+        gltf::animation::util::ReadOutputs::Translations(values) => values
+            .map(|value| AnimationValue::Vec3(Vec3::new(value[0], value[1], value[2])))
+            .collect(),
+        gltf::animation::util::ReadOutputs::Scales(values) => values
+            .map(|value| AnimationValue::Vec3(Vec3::new(value[0], value[1], value[2])))
+            .collect(),
+        gltf::animation::util::ReadOutputs::Rotations(values) => values
+            .into_f32()
+            .map(|value| {
+                AnimationValue::Rotation(
+                    Quaternion::new(value[0], value[1], value[2], value[3]).normalized(),
+                )
+            })
+            .collect(),
+        gltf::animation::util::ReadOutputs::MorphTargetWeights(_) => return None,
+    };
+    if inputs.is_empty() || outputs.is_empty() {
+        return None;
+    }
+    Some(AnimationChannel {
+        target_node: channel.target().node().index(),
+        property,
+        sampler: AnimationSampler {
+            inputs,
+            outputs,
+            interpolation,
+        },
+    })
 }
 
 #[cfg(feature = "textures")]
@@ -320,6 +583,8 @@ fn gltf_image_to_texture(path: &Path, index: usize, image: &gltf::image::Data) -
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::animation::{sample_mesh_animation, AnimatedProperty};
+    use std::{fs, time::SystemTime};
 
     #[test]
     fn transforms_points() {
@@ -351,5 +616,93 @@ mod tests {
         assert!(!mesh.tex_coords.is_empty());
         #[cfg(feature = "textures")]
         assert!(!mesh.textures.is_empty());
+    }
+
+    #[test]
+    fn loads_shantae_skin_animation_when_present() {
+        let path = Path::new("models/shantae/scene.gltf");
+        if !path.exists() {
+            return;
+        }
+        let mesh = load_gltf(path, &MeshLoadOptions::default()).unwrap();
+        assert!(!mesh.animations.is_empty());
+        assert!(!mesh.skins.is_empty());
+
+        let sampled = sample_mesh_animation(&mesh, 0, 0.1, true).unwrap();
+        assert_eq!(sampled.vertices.len(), mesh.vertices.len());
+        assert_ne!(sampled.vertices, mesh.vertices);
+    }
+
+    #[test]
+    fn loads_generated_translation_animation() {
+        let dir = std::env::temp_dir().join(format!(
+            "ratatui-3dmesh-gltf-animation-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let bin_path = dir.join("anim.bin");
+        let gltf_path = dir.join("scene.gltf");
+
+        let mut bin = Vec::new();
+        for value in [
+            0.0_f32, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, // positions
+            0.0, 1.0, // input times
+            0.0, 0.0, 0.0, 1.0, 0.0, 0.0, // translation outputs
+        ] {
+            bin.extend_from_slice(&value.to_le_bytes());
+        }
+        fs::write(&bin_path, bin).unwrap();
+        fs::write(
+            &gltf_path,
+            r#"{
+  "asset": { "version": "2.0" },
+  "buffers": [{ "uri": "anim.bin", "byteLength": 68 }],
+  "bufferViews": [
+    { "buffer": 0, "byteOffset": 0, "byteLength": 36, "target": 34962 },
+    { "buffer": 0, "byteOffset": 36, "byteLength": 8 },
+    { "buffer": 0, "byteOffset": 44, "byteLength": 24 }
+  ],
+  "accessors": [
+    { "bufferView": 0, "componentType": 5126, "count": 3, "type": "VEC3", "min": [0, 0, 0], "max": [1, 1, 0] },
+    { "bufferView": 1, "componentType": 5126, "count": 2, "type": "SCALAR", "min": [0], "max": [1] },
+    { "bufferView": 2, "componentType": 5126, "count": 2, "type": "VEC3" }
+  ],
+  "meshes": [{ "primitives": [{ "attributes": { "POSITION": 0 }, "mode": 4 }] }],
+  "nodes": [{ "name": "animated-node", "mesh": 0 }],
+  "scenes": [{ "nodes": [0] }],
+  "scene": 0,
+  "animations": [{
+    "name": "Move",
+    "samplers": [{ "input": 1, "output": 2, "interpolation": "LINEAR" }],
+    "channels": [{ "sampler": 0, "target": { "node": 0, "path": "translation" } }]
+  }]
+}"#,
+        )
+        .unwrap();
+
+        let mesh = load_gltf(&gltf_path, &MeshLoadOptions::default()).unwrap();
+        assert_eq!(mesh.animations.len(), 1);
+        assert!(!mesh.flip_texture_v);
+        assert_eq!(mesh.animations[0].name, "Move");
+        assert_eq!(mesh.animations[0].duration_seconds, 1.0);
+        assert_eq!(mesh.animations[0].channel_count(), 1);
+        assert_eq!(
+            mesh.animations[0].channels[0].property,
+            AnimatedProperty::Translation
+        );
+        assert_eq!(mesh.animation_nodes.len(), 1);
+        assert_eq!(
+            mesh.animation_nodes[0].vertex_ranges[0],
+            MeshRange::new(0, 3)
+        );
+
+        let sampled = sample_mesh_animation(&mesh, 0, 1.0, false).unwrap();
+        assert_eq!(sampled.vertices[0], Vec3::new(1.0, 0.0, 0.0));
+
+        let _ = fs::remove_dir_all(dir);
     }
 }

@@ -1,6 +1,7 @@
 use ratatui::{buffer::Buffer, layout::Rect, style::Color};
 
 use crate::{
+    animation::sample_mesh_animation,
     config::{ColorMode, Mesh3dConfig, RenderMode, TextureFilter},
     model::{Material, Mesh, Texture, Vec2, Vec3},
     widget::Mesh3dState,
@@ -32,10 +33,21 @@ pub fn render_mesh(
         }
     }
 
+    let mesh = state
+        .selected_animation
+        .and_then(|clip| {
+            sample_mesh_animation(
+                mesh,
+                clip,
+                state.animation_time_seconds,
+                state.animation_looping,
+            )
+        })
+        .unwrap_or_else(|| mesh.clone());
     let mesh = if config.normalize {
         mesh.normalized()
     } else {
-        mesh.clone()
+        mesh
     };
     let rotation = state.rotation;
     let pan = state.pan;
@@ -114,6 +126,7 @@ pub fn render_mesh(
                             tri: [a, b, c],
                             uvs,
                             texture,
+                            flip_v: mesh.flip_texture_v && config.flip_texture_v,
                             intensity,
                         };
                         fill_textured_triangle(area, buf, &mut zbuf, textured, config);
@@ -167,6 +180,7 @@ struct TexturedTriangle<'a> {
     tri: [ProjectedVertex; 3],
     uvs: [Vec2; 3],
     texture: &'a Texture,
+    flip_v: bool,
     intensity: f32,
 }
 
@@ -192,10 +206,15 @@ fn fill_textured_triangle(
             TextureFilter::Nearest => {
                 textured
                     .texture
-                    .sample_nearest(uv, config.texture_wrap, config.flip_texture_v)
+                    .sample_nearest(uv, config.texture_wrap, textured.flip_v)
             }
-            TextureFilter::Bilinear => sample_bilinear(textured.texture, uv, config),
+            TextureFilter::Bilinear => {
+                sample_bilinear(textured.texture, uv, textured.flip_v, config)
+            }
         };
+        if rgba[3] < 16 {
+            return None;
+        }
         let rgb = texture_rgb(rgba, textured.intensity, config);
         let luminance = luminance(rgb);
         let ch = config.glyph_for_intensity(if config.texture_lighting {
@@ -203,16 +222,16 @@ fn fill_textured_triangle(
         } else {
             luminance
         });
-        (
+        Some((
             ch,
             config
                 .foreground_style
                 .fg(Color::Rgb(rgb[0], rgb[1], rgb[2])),
-        )
+        ))
     });
 }
 
-fn sample_bilinear(texture: &Texture, uv: Vec2, config: &Mesh3dConfig) -> [u8; 4] {
+fn sample_bilinear(texture: &Texture, uv: Vec2, flip_v: bool, config: &Mesh3dConfig) -> [u8; 4] {
     // Terminal cells are coarse; a compact 4-tap sampler is enough and keeps Texture simple.
     let w = texture.width.max(1) as f32;
     let h = texture.height.max(1) as f32;
@@ -224,7 +243,7 @@ fn sample_bilinear(texture: &Texture, uv: Vec2, config: &Mesh3dConfig) -> [u8; 4
         crate::config::TextureWrap::Repeat => uv.v.rem_euclid(1.0),
         crate::config::TextureWrap::Clamp => uv.v.clamp(0.0, 1.0),
     };
-    if config.flip_texture_v {
+    if flip_v {
         v = 1.0 - v;
     }
     let x = u * (w - 1.0);
@@ -240,12 +259,37 @@ fn sample_bilinear(texture: &Texture, uv: Vec2, config: &Mesh3dConfig) -> [u8; 4
     let p01 = texture.sample_nearest(Vec2::new(x0, y1), config.texture_wrap, false);
     let p11 = texture.sample_nearest(Vec2::new(x1, y1), config.texture_wrap, false);
     let mut out = [0; 4];
-    for i in 0..4 {
-        let a = f32::from(p00[i]) * (1.0 - tx) + f32::from(p10[i]) * tx;
-        let b = f32::from(p01[i]) * (1.0 - tx) + f32::from(p11[i]) * tx;
-        out[i] = (a * (1.0 - ty) + b * ty).round().clamp(0.0, 255.0) as u8;
+    let alpha = bilinear_channel(p00[3], p10[3], p01[3], p11[3], tx, ty);
+    out[3] = alpha;
+    let alpha_f = f32::from(alpha).max(1.0);
+    for i in 0..3 {
+        let c00 = f32::from(p00[i]) * f32::from(p00[3]) / 255.0;
+        let c10 = f32::from(p10[i]) * f32::from(p10[3]) / 255.0;
+        let c01 = f32::from(p01[i]) * f32::from(p01[3]) / 255.0;
+        let c11 = f32::from(p11[i]) * f32::from(p11[3]) / 255.0;
+        let premultiplied = bilinear_f32(c00, c10, c01, c11, tx, ty);
+        out[i] = (premultiplied * 255.0 / alpha_f).round().clamp(0.0, 255.0) as u8;
     }
     out
+}
+
+fn bilinear_channel(c00: u8, c10: u8, c01: u8, c11: u8, tx: f32, ty: f32) -> u8 {
+    bilinear_f32(
+        f32::from(c00),
+        f32::from(c10),
+        f32::from(c01),
+        f32::from(c11),
+        tx,
+        ty,
+    )
+    .round()
+    .clamp(0.0, 255.0) as u8
+}
+
+fn bilinear_f32(c00: f32, c10: f32, c01: f32, c11: f32, tx: f32, ty: f32) -> f32 {
+    let a = c00 * (1.0 - tx) + c10 * tx;
+    let b = c01 * (1.0 - tx) + c11 * tx;
+    a * (1.0 - ty) + b * ty
 }
 
 #[allow(dead_code)]
@@ -349,5 +393,58 @@ mod tests {
             .content()
             .iter()
             .any(|cell| cell.fg == Color::Rgb(255, 0, 0)));
+    }
+
+    #[test]
+    fn transparent_texture_samples_do_not_paint() {
+        let mut mesh = Mesh::with_attributes(
+            "tri",
+            vec![
+                Vec3::new(-0.8, -0.8, 0.0),
+                Vec3::new(0.8, -0.8, 0.0),
+                Vec3::new(0.0, 0.8, 0.0),
+            ],
+            vec![
+                Vec2::new(0.0, 0.0),
+                Vec2::new(1.0, 0.0),
+                Vec2::new(0.0, 1.0),
+            ],
+            vec![],
+            vec![Face::with_attributes(
+                vec![0, 1, 2],
+                vec![Some(0), Some(1), Some(2)],
+                vec![None, None, None],
+            )],
+            vec![],
+        )
+        .unwrap();
+        mesh.default_texture = Some(TextureRef {
+            path: "transparent.png".into(),
+            index: Some(0),
+        });
+        mesh.textures
+            .push(Texture::new("transparent.png", 1, 1, vec![0, 0, 255, 0]));
+        let backend = TestBackend::new(20, 10);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                render_mesh(
+                    &mesh,
+                    frame.area(),
+                    frame.buffer_mut(),
+                    &Mesh3dState::default(),
+                    &Mesh3dConfig::default()
+                        .backface_culling(false)
+                        .color_mode(ColorMode::Texture)
+                        .texture_lighting(false),
+                );
+            })
+            .unwrap();
+        assert!(terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .all(|cell| cell.symbol() == " "));
     }
 }

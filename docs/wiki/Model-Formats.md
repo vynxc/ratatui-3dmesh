@@ -59,9 +59,13 @@ Supported:
 
 - Mesh primitives and triangle indices
 - Node transforms
+- Node translation/rotation/scale animation clips with step or linear interpolation
+- CPU skinning for meshes with `JOINTS_0` and `WEIGHTS_0`
 - Vertex positions, normals, and UV set 0
 - PBR base-color factors as material diffuse colors
 - PBR base-color textures when `textures` is also enabled
+
+Imported clips are exposed as `mesh.animations`. Advanced glTF animation features such as morph-target weights and cubic-spline interpolation are not evaluated in this first pass.
 
 Example:
 
@@ -80,6 +84,8 @@ Supported:
 - Facet normals when present
 
 STL does not carry UV texture coordinates in this loader, so STL renders with material/lighting/foreground color modes.
+
+OBJ and STL do not normally contain embedded animation, so their loaders return static meshes with `mesh.animations.is_empty()`.
 
 ## Tips
 

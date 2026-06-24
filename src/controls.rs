@@ -24,10 +24,24 @@ pub enum ControlAction {
 
     /// Color brightness was changed.
     AdjustColorBrightness,
+    /// Projection mode was changed.
+    ToggleProjection,
     /// Auto-spin was toggled.
     ToggleAutoSpin,
     /// Help overlay was toggled.
     ToggleHelp,
+    /// Animation playback was toggled.
+    ToggleAnimationPlayback,
+    /// Animation looping was toggled.
+    ToggleAnimationLooping,
+    /// Animation was restarted.
+    RestartAnimation,
+    /// Next animation clip was selected.
+    NextAnimation,
+    /// Previous animation clip was selected.
+    PreviousAnimation,
+    /// Animation speed was changed.
+    AdjustAnimationSpeed,
     /// Caller should quit the viewer.
     Quit,
 }
@@ -63,6 +77,17 @@ impl ControlMap {
         key: KeyEvent,
         state: &mut Mesh3dState,
         config: &mut Mesh3dConfig,
+    ) -> Option<ControlAction> {
+        self.handle_key_with_animation_count(key, state, config, 0)
+    }
+
+    /// Apply a crossterm key event with animation clip-count awareness.
+    pub fn handle_key_with_animation_count(
+        &self,
+        key: KeyEvent,
+        state: &mut Mesh3dState,
+        config: &mut Mesh3dConfig,
+        animation_clip_count: usize,
     ) -> Option<ControlAction> {
         let shift = key.modifiers.contains(KeyModifiers::SHIFT);
         let fast = if shift { 2.0 } else { 1.0 };
@@ -128,6 +153,34 @@ impl ControlMap {
                 state.toggle_help();
                 Some(ControlAction::ToggleHelp)
             }
+            KeyCode::Char('p') => {
+                state.toggle_animation_playback();
+                Some(ControlAction::ToggleAnimationPlayback)
+            }
+            KeyCode::Char('v') => {
+                state.toggle_animation_looping();
+                Some(ControlAction::ToggleAnimationLooping)
+            }
+            KeyCode::Char('0') => {
+                state.restart_animation();
+                Some(ControlAction::RestartAnimation)
+            }
+            KeyCode::Char('n') => {
+                state.next_animation(animation_clip_count);
+                Some(ControlAction::NextAnimation)
+            }
+            KeyCode::Char('b') => {
+                state.previous_animation(animation_clip_count);
+                Some(ControlAction::PreviousAnimation)
+            }
+            KeyCode::Char('.') => {
+                state.adjust_animation_speed(1.25);
+                Some(ControlAction::AdjustAnimationSpeed)
+            }
+            KeyCode::Char(',') => {
+                state.adjust_animation_speed(0.8);
+                Some(ControlAction::AdjustAnimationSpeed)
+            }
             KeyCode::Char('m') => {
                 config.render_mode = match config.render_mode {
                     RenderMode::Solid => RenderMode::Wireframe,
@@ -145,6 +198,17 @@ impl ControlMap {
                     ColorMode::Auto => ColorMode::Off,
                 };
                 Some(ControlAction::ToggleColorMode)
+            }
+            KeyCode::Char('o') => {
+                config.projection = match config.projection {
+                    crate::config::ProjectionMode::Perspective => {
+                        crate::config::ProjectionMode::Orthographic
+                    }
+                    crate::config::ProjectionMode::Orthographic => {
+                        crate::config::ProjectionMode::Perspective
+                    }
+                };
+                Some(ControlAction::ToggleProjection)
             }
 
             KeyCode::Char(']') => {

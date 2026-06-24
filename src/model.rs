@@ -2,7 +2,10 @@ use std::{path::Path, sync::Arc};
 
 use ratatui::style::Color;
 
-use crate::{loader, Error, Result};
+use crate::{
+    animation::{AnimationClip, AnimationNode, SkinBinding},
+    loader, Error, Result,
+};
 
 /// A small 3D vector type used for mesh geometry and camera math.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
@@ -380,10 +383,14 @@ pub struct Mesh {
     pub name: String,
     /// Vertex positions.
     pub vertices: Vec<Vec3>,
+    /// Original bind-pose vertex positions used for animation sampling.
+    pub bind_vertices: Vec<Vec3>,
     /// Texture coordinates.
     pub tex_coords: Vec<Vec2>,
     /// Vertex normals from OBJ files.
     pub normals: Vec<Vec3>,
+    /// Original bind-pose vertex normals used for animation sampling.
+    pub bind_normals: Vec<Vec3>,
     /// Faces/polygons.
     pub faces: Vec<Face>,
     /// Materials referenced by faces.
@@ -393,6 +400,14 @@ pub struct Mesh {
     pub textures: Vec<Texture>,
     /// Texture used when a face has UVs but no material texture.
     pub default_texture: Option<TextureRef>,
+    /// Whether texture V coordinates should be flipped during sampling.
+    pub flip_texture_v: bool,
+    /// Embedded animation clips. glTF/GLB may populate this; OBJ/STL leave it empty.
+    pub animations: Vec<AnimationClip>,
+    /// Scene-node metadata for applying animation to flattened vertices.
+    pub animation_nodes: Vec<AnimationNode>,
+    /// glTF skin bindings for CPU joint animation.
+    pub skins: Vec<SkinBinding>,
     /// Cached bounds.
     pub bounds: Bounds,
 }
@@ -429,15 +444,23 @@ impl Mesh {
             return Err(Error::EmptyMesh);
         }
         let bounds = Bounds::from_vertices(&vertices).ok_or(Error::EmptyMesh)?;
+        let bind_vertices = vertices.clone();
+        let bind_normals = normals.clone();
         Ok(Self {
             name: name.into(),
             vertices,
+            bind_vertices,
             tex_coords,
             normals,
+            bind_normals,
             faces,
             materials,
             textures: Vec::new(),
             default_texture: None,
+            flip_texture_v: true,
+            animations: Vec::new(),
+            animation_nodes: Vec::new(),
+            skins: Vec::new(),
             bounds,
         })
     }
@@ -493,15 +516,26 @@ impl Mesh {
             .map(|&v| (v - center) / radius)
             .collect::<Vec<_>>();
         let bounds = Bounds::from_vertices(&vertices).unwrap_or(self.bounds);
+        let bind_vertices = self
+            .bind_vertices
+            .iter()
+            .map(|&v| (v - center) / radius)
+            .collect::<Vec<_>>();
         Self {
             name: self.name.clone(),
             vertices,
+            bind_vertices,
             tex_coords: self.tex_coords.clone(),
             normals: self.normals.clone(),
+            bind_normals: self.bind_normals.clone(),
             faces: self.faces.clone(),
             materials: self.materials.clone(),
             textures: self.textures.clone(),
             default_texture: self.default_texture.clone(),
+            flip_texture_v: self.flip_texture_v,
+            animations: self.animations.clone(),
+            animation_nodes: self.animation_nodes.clone(),
+            skins: self.skins.clone(),
             bounds,
         }
     }
@@ -534,5 +568,7 @@ mod tests {
         .unwrap();
         let normalized = mesh.normalized();
         assert!(normalized.bounds.radius() <= 1.01);
+        assert!(normalized.animations.is_empty());
+        assert!(normalized.animation_nodes.is_empty());
     }
 }

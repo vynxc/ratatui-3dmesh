@@ -19,7 +19,7 @@ use ratatui::{
 };
 use ratatui_3dmesh::{
     ColorMode, ControlAction, ControlMap, Mesh, Mesh3dConfig, Mesh3dState, Mesh3dWidget,
-    MeshLoadOptions,
+    MeshLoadOptions, ProjectionMode, Vec3,
 };
 
 #[derive(Debug, Clone)]
@@ -78,9 +78,11 @@ fn run_app(
 ) -> io::Result<()> {
     let controls = ControlMap::default();
     let mut state = Mesh3dState {
-        auto_spin_enabled: true,
+        auto_spin_enabled: false,
+        rotation: Vec3::default(),
         ..Mesh3dState::default()
     };
+    state.clamp_animation_selection(mesh.animations.len());
     let initial_color = if mesh.default_texture.is_some()
         || mesh
             .materials
@@ -93,6 +95,7 @@ fn run_app(
     };
     let mut config = Mesh3dConfig::default()
         .color_mode(initial_color)
+        .projection(ProjectionMode::Orthographic)
         .color_brightness(1.45)
         .auto_spin([0.0, 0.45, 0.0])
         .background_style(Some(Style::default().bg(Color::Black)));
@@ -108,12 +111,13 @@ fn run_app(
         terminal.draw(|frame| {
             let chunks = Layout::default()
                 .direction(Direction::Vertical)
-                .constraints([Constraint::Min(3), Constraint::Length(4)])
+                .constraints([Constraint::Min(3), Constraint::Length(5)])
                 .split(frame.area());
             let viewer = Mesh3dWidget::new(&mesh).config(config.clone());
             frame.render_stateful_widget(viewer, chunks[0], &mut state);
 
             let texture_status = texture_status(&mesh, texture_arg.as_ref());
+            let animation_status = animation_status(&mesh, &state);
             let status = Paragraph::new(vec![
                 Line::from(format!(
                     "{} | vertices:{} faces:{} uvs:{} textures:{} | mode:{:?} color:{:?} brightness:{:.2} | auto-spin:{}",
@@ -128,7 +132,8 @@ fn run_app(
                     state.auto_spin_enabled
                 )),
                 Line::from(texture_status),
-                Line::from(format!("last: {last_action} | arrows/WASD rotate, hjkl pan, +/- zoom, m/c toggles, [/] brightness, ? help, q quit")),
+                Line::from(animation_status),
+                Line::from(format!("last: {last_action} | arrows/WASD rotate, hjkl pan, +/- zoom, m/c/o, [/] brightness, p/n/b/0 anim, ,/. speed, ? help, q quit")),
             ])
             .block(Block::default().borders(Borders::ALL).title("ratatui-3dmesh"));
             frame.render_widget(status, chunks[1]);
@@ -136,16 +141,54 @@ fn run_app(
 
         if event::poll(Duration::from_millis(16))? {
             if let Event::Key(key) = event::read()? {
-                if let Some(action) = controls.handle_key(key, &mut state, &mut config) {
+                if let Some(action) = controls.handle_key_with_animation_count(
+                    key,
+                    &mut state,
+                    &mut config,
+                    mesh.animations.len(),
+                ) {
                     if action == ControlAction::Quit {
                         break;
                     }
+                    state.clamp_animation_selection(mesh.animations.len());
                     last_action = format!("{action:?}");
                 }
             }
         }
     }
     Ok(())
+}
+
+fn animation_status(mesh: &Mesh, state: &Mesh3dState) -> String {
+    if mesh.animations.is_empty() {
+        return "animation: none (OBJ/STL/static glTF render as static meshes)".to_string();
+    }
+    let selected = state
+        .selected_animation
+        .and_then(|index| mesh.animations.get(index).map(|clip| (index, clip)));
+    let Some((index, clip)) = selected else {
+        return format!(
+            "animation: {} clips loaded, none selected",
+            mesh.animations.len()
+        );
+    };
+    let time = state.animation_display_time(clip.duration_seconds);
+    format!(
+        "animation: {}/{} {} | {:.2}/{:.2}s | channels:{} | speed:{:.2} | {} | loop:{}",
+        index + 1,
+        mesh.animations.len(),
+        clip.name,
+        time,
+        clip.duration_seconds,
+        clip.channel_count(),
+        state.animation_speed,
+        if state.animation_playing {
+            "playing"
+        } else {
+            "paused"
+        },
+        state.animation_looping
+    )
 }
 
 fn texture_status(mesh: &Mesh, texture_arg: Option<&PathBuf>) -> String {

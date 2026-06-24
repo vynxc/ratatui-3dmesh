@@ -169,5 +169,7 @@ mod tests {
         assert_eq!(mesh.vertices.len(), 3);
         assert_eq!(mesh.faces.len(), 1);
         assert_eq!(mesh.faces[0].normal, Some(Vec3::new(0.0, 0.0, 1.0)));
+        assert!(mesh.animations.is_empty());
+        assert!(mesh.animation_nodes.is_empty());
     }
 }

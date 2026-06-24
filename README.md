@@ -9,7 +9,7 @@ A reusable [Ratatui](https://ratatui.rs/) widget for viewing 3D meshes as shaded
 
 This crate is built for embedding. Your app owns terminal initialization, layout, and event loops; this crate provides mesh loading, configuration, rendering, state, and optional crossterm controls.
 
-> Status: early public crate. OBJ/STL/glTF/MTL, UV parsing, optional texture images, solid/wire/point modes, color policies, controls, docs, and an example viewer are included.
+> Status: early public crate. OBJ/STL/glTF/MTL, glTF node animation playback, UV parsing, optional texture images, solid/wire/point modes, color policies, controls, docs, and an example viewer are included.
 
 ## Install
 
@@ -93,6 +93,8 @@ The texture loader sniffs image bytes instead of trusting the extension, so a PN
 
 glTF support is available through the optional `gltf` feature. The loader reads `.gltf`/`.glb` mesh primitives, indices, normals, UVs, base-color factors, and base-color textures when `textures` is also enabled.
 
+Embedded glTF/GLB animations are imported as `mesh.animations`. This first pass supports node translation, rotation, and scale channels with linear or step interpolation, including CPU skinning for glTF meshes with `JOINTS_0`/`WEIGHTS_0`. Morph-target weights and cubic-spline interpolation are left as follow-up scope.
+
 Run the axe asset:
 
 ```bash
@@ -129,9 +131,14 @@ Controls:
 | `+` / `-` | zoom |
 | `m` | cycle solid/wireframe/points |
 | `c` | cycle material/lighting/texture/auto/off color |
-
+| `o` | toggle perspective/orthographic projection |
 | `[` / `]` | decrease/increase color brightness |
 | `space` | toggle auto-spin |
+| `p` | play/pause animation |
+| `n` / `b` | next/previous animation clip |
+| `0` | restart animation |
+| `,` / `.` | slow down/speed up animation |
+| `v` | toggle animation looping |
 | `r` | reset view |
 | `?` | help overlay |
 | `q` / Esc | quit example |
@@ -143,10 +150,10 @@ Controls:
 | OBJ | vertices, texture coordinates, normals, polygon faces, negative indices, `usemtl`, companion `mtllib` |
 | MTL | `newmtl`, diffuse `Kd` colors, diffuse `map_Kd` texture paths |
 | Textures | optional PNG/JPEG decode to RGBA8 via the `textures` feature; manual `--texture` override supported |
-| glTF/GLB | mesh primitives, indices, normals, UVs, base-color factors, base-color textures with `gltf` + `textures` |
+| glTF/GLB | mesh primitives, indices, normals, UVs, base-color factors, node TRS animations, base-color textures with `gltf` + `textures` |
 | STL | ASCII STL and binary STL |
 
-STL files and OBJ/glTF primitives without UVs continue to render with material/lighting/grayscale modes.
+STL and OBJ are static formats in this crate and expose `mesh.animations.is_empty()`. STL files and OBJ/glTF primitives without UVs continue to render with material/lighting/grayscale modes.
 
 ## Configuration highlights
 
