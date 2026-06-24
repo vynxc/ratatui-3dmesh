@@ -137,7 +137,9 @@ impl ControlMap {
                 config.color_mode = match config.color_mode {
                     ColorMode::Off => ColorMode::Material,
                     ColorMode::Material => ColorMode::Lighting,
-                    ColorMode::Lighting => ColorMode::Off,
+                    ColorMode::Lighting => ColorMode::Texture,
+                    ColorMode::Texture => ColorMode::Auto,
+                    ColorMode::Auto => ColorMode::Off,
                 };
                 Some(ControlAction::ToggleColorMode)
             }

@@ -15,6 +15,7 @@ default = ["obj", "stl", "mtl"]
 obj = []
 stl = []
 mtl = []
+textures = ["dep:image"]
 serde = ["dep:serde"]
 cli-example = ["dep:crossterm"]
 
@@ -22,6 +23,7 @@ cli-example = ["dep:crossterm"]
 ratatui = { version = "0.29", default-features = false, features = ["serde"] }
 thiserror = "2"
 serde = { version = "1", features = ["derive"], optional = true }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"], optional = true }
 
 crossterm = { version = "0.28", optional = true }
 

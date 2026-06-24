@@ -35,6 +35,32 @@ pub enum ColorMode {
     Material,
     /// Map lighting intensity to grayscale terminal colors.
     Lighting,
+    /// Prefer sampled texture colors, falling back to material/foreground when unavailable.
+    Texture,
+    /// Prefer texture, then material, then lighting fallback.
+    Auto,
+}
+
+/// Texture filtering mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum TextureFilter {
+    /// Fast nearest-neighbor sampling.
+    #[default]
+    Nearest,
+    /// Smooth bilinear sampling.
+    Bilinear,
+}
+
+/// Behavior for UVs outside the `[0, 1]` range.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum TextureWrap {
+    /// Repeat the image.
+    #[default]
+    Repeat,
+    /// Clamp to the image edge.
+    Clamp,
 }
 
 /// User-facing rendering configuration.
@@ -49,6 +75,14 @@ pub struct Mesh3dConfig {
     pub projection: ProjectionMode,
     /// Terminal color strategy.
     pub color_mode: ColorMode,
+    /// Texture filtering mode.
+    pub texture_filter: TextureFilter,
+    /// Texture wrap policy.
+    pub texture_wrap: TextureWrap,
+    /// Flip V texture coordinates while sampling. Useful because OBJ and image origins often differ.
+    pub flip_texture_v: bool,
+    /// Multiply sampled texture colors by terminal lighting intensity.
+    pub texture_lighting: bool,
     /// Whether to fit the model to the visible area automatically.
     pub auto_fit: bool,
     /// Additional scale multiplier.
@@ -88,6 +122,10 @@ impl Default for Mesh3dConfig {
             render_mode: RenderMode::Solid,
             projection: ProjectionMode::Perspective,
             color_mode: ColorMode::Material,
+            texture_filter: TextureFilter::Nearest,
+            texture_wrap: TextureWrap::Repeat,
+            flip_texture_v: true,
+            texture_lighting: true,
             auto_fit: true,
             scale: 1.0,
             fov_y_degrees: 60.0,
@@ -115,6 +153,7 @@ impl Mesh3dConfig {
             render_mode: RenderMode::Wireframe,
             max_faces: Some(25_000),
             backface_culling: true,
+            texture_filter: TextureFilter::Nearest,
             ..Self::default()
         }
     }
@@ -126,6 +165,7 @@ impl Mesh3dConfig {
             glyph_ramp: " .'`^\",:;Il!i><~+_-?][}{1)(|\\/tfjrxnuvczXYUJCLQ0OZmwqpdbkhao*#MW&8%B@$"
                 .to_string(),
             render_mode: RenderMode::Solid,
+            texture_filter: TextureFilter::Bilinear,
             max_faces: None,
             ..Self::default()
         }
@@ -152,6 +192,30 @@ impl Mesh3dConfig {
     #[must_use]
     pub fn color_mode(mut self, mode: ColorMode) -> Self {
         self.color_mode = mode;
+        self
+    }
+
+    #[must_use]
+    pub fn texture_filter(mut self, filter: TextureFilter) -> Self {
+        self.texture_filter = filter;
+        self
+    }
+
+    #[must_use]
+    pub fn texture_wrap(mut self, wrap: TextureWrap) -> Self {
+        self.texture_wrap = wrap;
+        self
+    }
+
+    #[must_use]
+    pub fn flip_texture_v(mut self, enabled: bool) -> Self {
+        self.flip_texture_v = enabled;
+        self
+    }
+
+    #[must_use]
+    pub fn texture_lighting(mut self, enabled: bool) -> Self {
+        self.texture_lighting = enabled;
         self
     }
 

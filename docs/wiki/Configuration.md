@@ -20,11 +20,44 @@
 
 ## Lighting and color
 
-- `color_mode(ColorMode)`: `Material`, `Lighting`, or `Off`.
+- `color_mode(ColorMode)`: `Material`, `Lighting`, `Texture`, `Auto`, or `Off`.
 - `light_direction([f32; 3])`: light vector.
 - `lighting(ambient, diffuse)`: light weights.
 - `foreground_style(Style)`: fallback style.
 - `background_style(Option<Style>)`: optional clear style.
+
+Color modes:
+
+- `Off`: use the configured foreground style only.
+- `Material`: use MTL diffuse `Kd` colors when available.
+- `Lighting`: render grayscale truecolor from lighting intensity.
+- `Texture`: sample loaded diffuse textures when a triangle has UVs; otherwise fall back to material/foreground.
+- `Auto`: prefer texture, then material, then fallback style.
+
+## Textures
+
+Available when the `textures` feature is enabled:
+
+- `texture_filter(TextureFilter)`: `Nearest` for speed or `Bilinear` for smoother sampling.
+- `texture_wrap(TextureWrap)`: `Repeat` or `Clamp` for UVs outside `[0, 1]`.
+- `flip_texture_v(bool)`: defaults true to handle common OBJ/image origin differences.
+- `texture_lighting(bool)`: multiply sampled RGB by mesh lighting.
+
+Texture loading is configured through `MeshLoadOptions`:
+
+```rust,no_run
+use ratatui_3dmesh::{Mesh, MeshLoadOptions};
+
+# fn load() -> ratatui_3dmesh::Result<Mesh> {
+let mesh = Mesh::load_with_options(
+    "model.obj",
+    MeshLoadOptions::default()
+        .load_material_textures(true)
+        .texture_override("base_color.png"),
+)?;
+# Ok(mesh)
+# }
+```
 
 ## UX
 
@@ -38,3 +71,5 @@
 let fast = Mesh3dConfig::fast();
 let quality = Mesh3dConfig::quality();
 ```
+
+`fast()` favors wireframe and a face cap. `quality()` uses a longer glyph ramp and bilinear texture sampling.
