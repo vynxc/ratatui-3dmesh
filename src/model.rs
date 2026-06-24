@@ -328,6 +328,9 @@ pub struct Material {
     pub emissive: [f32; 3],
     /// Optional emissive texture map.
     pub emissive_texture: Option<TextureRef>,
+    /// Material is unlit: shade with the flat base color, ignoring scene lighting
+    /// (glTF `KHR_materials_unlit`). Defaults to `false`.
+    pub unlit: bool,
 }
 
 impl Material {
@@ -344,6 +347,7 @@ impl Material {
             double_sided: false,
             emissive: [0.0, 0.0, 0.0],
             emissive_texture: None,
+            unlit: false,
         }
     }
 
