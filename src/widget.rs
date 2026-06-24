@@ -150,7 +150,7 @@ fn draw_hints(area: Rect, buf: &mut Buffer, mesh: &Mesh, state: &Mesh3dState) {
 }
 
 fn draw_help(area: Rect, buf: &mut Buffer) {
-    if area.width < 28 || area.height < 8 {
+    if area.width < 30 || area.height < 9 {
         return;
     }
     let lines = [
@@ -160,6 +160,7 @@ fn draw_help(area: Rect, buf: &mut Buffer) {
         " + / -         : zoom ",
         " m             : render mode ",
         " c             : color mode ",
+        " [ / ]         : brightness ",
         " space         : auto-spin ",
         " r reset | ? help | q quit ",
     ];

@@ -205,8 +205,29 @@ pub struct Texture {
     pub width: u32,
     /// Image height in pixels.
     pub height: u32,
+    /// Average RGB color, precomputed for wireframe/points texture fallback.
+    pub average_color: [u8; 3],
+
     /// Packed RGBA8 pixels in row-major order.
     pub rgba: Arc<[u8]>,
+}
+fn average_rgba_color(rgba: &[u8]) -> [u8; 3] {
+    let mut total = [0_u64; 3];
+    let mut samples = 0_u64;
+    for pixel in rgba.chunks_exact(4) {
+        total[0] += u64::from(pixel[0]);
+        total[1] += u64::from(pixel[1]);
+        total[2] += u64::from(pixel[2]);
+        samples += 1;
+    }
+    if samples == 0 {
+        return [255, 255, 255];
+    }
+    [
+        (total[0] / samples) as u8,
+        (total[1] / samples) as u8,
+        (total[2] / samples) as u8,
+    ]
 }
 
 impl Texture {
@@ -218,12 +239,19 @@ impl Texture {
         height: u32,
         rgba: Vec<u8>,
     ) -> Self {
+        let average_color = average_rgba_color(&rgba);
         Self {
             path: path.into(),
             width,
             height,
             rgba: Arc::from(rgba),
+            average_color,
         }
+    }
+    /// Return the precomputed average RGB color for fast non-solid texture coloring.
+    #[must_use]
+    pub const fn average_color(&self) -> [u8; 3] {
+        self.average_color
     }
 
     /// Sample the texture using normalized UV coordinates.

@@ -57,6 +57,8 @@ The `--texture` flag is useful when an OBJ has UVs but no usable MTL file. OBJ +
 - `+` / `-`: zoom
 - `m`: cycle render modes
 - `c`: cycle color modes, including texture modes when texture data is loaded
+
+- `[` / `]`: decrease/increase color brightness
 - `space`: auto-spin
 - `?`: help
 - `q`: quit the example

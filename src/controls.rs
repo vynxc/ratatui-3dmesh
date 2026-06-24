@@ -21,6 +21,9 @@ pub enum ControlAction {
     ToggleRenderMode,
     /// Color mode was changed.
     ToggleColorMode,
+
+    /// Color brightness was changed.
+    AdjustColorBrightness,
     /// Auto-spin was toggled.
     ToggleAutoSpin,
     /// Help overlay was toggled.
@@ -142,6 +145,15 @@ impl ControlMap {
                     ColorMode::Auto => ColorMode::Off,
                 };
                 Some(ControlAction::ToggleColorMode)
+            }
+
+            KeyCode::Char(']') => {
+                config.color_brightness = (config.color_brightness * 1.15).clamp(0.0, 8.0);
+                Some(ControlAction::AdjustColorBrightness)
+            }
+            KeyCode::Char('[') => {
+                config.color_brightness = (config.color_brightness / 1.15).clamp(0.0, 8.0);
+                Some(ControlAction::AdjustColorBrightness)
             }
             _ => None,
         }
