@@ -19,6 +19,7 @@
 //! # }
 //! ```
 
+pub mod animation;
 pub mod config;
 #[cfg(feature = "cli-example")]
 pub mod controls;
@@ -28,6 +29,11 @@ pub mod model;
 pub mod render;
 pub mod widget;
 
+pub use animation::{
+    AnimatedProperty, AnimationChannel, AnimationClip, AnimationNode, AnimationSampler,
+    AnimationValue, Interpolation, MeshRange, NodeTransform, Quaternion, SkinBinding,
+    SkinnedVertex,
+};
 pub use config::{ColorMode, Mesh3dConfig, ProjectionMode, RenderMode, TextureFilter, TextureWrap};
 #[cfg(feature = "cli-example")]
 pub use controls::{ControlAction, ControlMap};

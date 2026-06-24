@@ -314,6 +314,8 @@ mod tests {
         assert_eq!(mesh.vertices.len(), 3);
         assert_eq!(mesh.faces.len(), 1);
         assert_eq!(mesh.faces[0].material.as_deref(), Some("red"));
+        assert!(mesh.animations.is_empty());
+        assert!(mesh.animation_nodes.is_empty());
     }
 
     #[test]

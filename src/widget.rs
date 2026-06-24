@@ -25,6 +25,16 @@ pub struct Mesh3dState {
     pub auto_spin_enabled: bool,
     /// Whether the built-in help overlay should be drawn.
     pub help_visible: bool,
+    /// Selected animation clip index, when animation playback is active.
+    pub selected_animation: Option<usize>,
+    /// Current animation playback time in seconds.
+    pub animation_time_seconds: f32,
+    /// Animation playback speed multiplier.
+    pub animation_speed: f32,
+    /// Whether animation playback advances in [`Self::tick`].
+    pub animation_playing: bool,
+    /// Whether animation playback loops at clip duration.
+    pub animation_looping: bool,
 }
 
 impl Default for Mesh3dState {
@@ -35,6 +45,11 @@ impl Default for Mesh3dState {
             zoom: 1.0,
             auto_spin_enabled: false,
             help_visible: false,
+            selected_animation: Some(0),
+            animation_time_seconds: 0.0,
+            animation_speed: 1.0,
+            animation_playing: true,
+            animation_looping: true,
         }
     }
 }
@@ -59,9 +74,19 @@ impl Mesh3dState {
     pub fn reset_view(&mut self) {
         let help_visible = self.help_visible;
         let auto_spin_enabled = self.auto_spin_enabled;
+        let selected_animation = self.selected_animation;
+        let animation_time_seconds = self.animation_time_seconds;
+        let animation_speed = self.animation_speed;
+        let animation_playing = self.animation_playing;
+        let animation_looping = self.animation_looping;
         *self = Self::default();
         self.help_visible = help_visible;
         self.auto_spin_enabled = auto_spin_enabled;
+        self.selected_animation = selected_animation;
+        self.animation_time_seconds = animation_time_seconds;
+        self.animation_speed = animation_speed;
+        self.animation_playing = animation_playing;
+        self.animation_looping = animation_looping;
     }
 
     /// Toggle auto-spin.
@@ -74,12 +99,85 @@ impl Mesh3dState {
         self.help_visible = !self.help_visible;
     }
 
-    /// Advance time-based state such as auto-spin.
+    /// Select an animation clip and restart playback time.
+    pub fn select_animation(&mut self, index: usize, clip_count: usize) {
+        if clip_count == 0 {
+            self.selected_animation = None;
+        } else {
+            self.selected_animation = Some(index.min(clip_count - 1));
+            self.restart_animation();
+        }
+    }
+
+    /// Select the next animation clip, wrapping when `clip_count` is non-zero.
+    pub fn next_animation(&mut self, clip_count: usize) {
+        if clip_count == 0 {
+            self.selected_animation = None;
+            return;
+        }
+        let current = self.selected_animation.unwrap_or(0);
+        self.select_animation((current + 1) % clip_count, clip_count);
+    }
+
+    /// Select the previous animation clip, wrapping when `clip_count` is non-zero.
+    pub fn previous_animation(&mut self, clip_count: usize) {
+        if clip_count == 0 {
+            self.selected_animation = None;
+            return;
+        }
+        let current = self.selected_animation.unwrap_or(0);
+        self.select_animation((current + clip_count - 1) % clip_count, clip_count);
+    }
+
+    /// Clamp the selected animation to available clips.
+    pub fn clamp_animation_selection(&mut self, clip_count: usize) {
+        if clip_count == 0 {
+            self.selected_animation = None;
+        } else {
+            self.selected_animation =
+                Some(self.selected_animation.unwrap_or(0).min(clip_count - 1));
+        }
+    }
+
+    /// Restart the selected animation from the beginning.
+    pub fn restart_animation(&mut self) {
+        self.animation_time_seconds = 0.0;
+    }
+
+    /// Toggle animation playback.
+    pub fn toggle_animation_playback(&mut self) {
+        self.animation_playing = !self.animation_playing;
+    }
+
+    /// Toggle animation looping.
+    pub fn toggle_animation_looping(&mut self) {
+        self.animation_looping = !self.animation_looping;
+    }
+
+    /// Multiply animation speed by `factor`.
+    pub fn adjust_animation_speed(&mut self, factor: f32) {
+        self.animation_speed = (self.animation_speed * factor).clamp(0.05, 8.0);
+    }
+
+    /// Return playback time clamped or wrapped to `duration_seconds`.
+    #[must_use]
+    pub fn animation_display_time(&self, duration_seconds: f32) -> f32 {
+        crate::animation::playback_time(
+            self.animation_time_seconds,
+            duration_seconds,
+            self.animation_looping,
+        )
+    }
+
+    /// Advance time-based state such as auto-spin and animation playback.
     pub fn tick(&mut self, delta_seconds: f32, config: &Mesh3dConfig) {
         if self.auto_spin_enabled {
             self.rotation.x += config.auto_spin[0] * delta_seconds;
             self.rotation.y += config.auto_spin[1] * delta_seconds;
             self.rotation.z += config.auto_spin[2] * delta_seconds;
+        }
+        if self.animation_playing {
+            self.animation_time_seconds += delta_seconds.max(0.0) * self.animation_speed;
         }
     }
 }
@@ -134,10 +232,11 @@ fn draw_hints(area: Rect, buf: &mut Buffer, mesh: &Mesh, state: &Mesh3dState) {
         return;
     }
     let text = format!(
-        " {} | faces:{} | zoom:{:.2} | ? help ",
+        " {} | faces:{} | zoom:{:.2} | anim:{} | ? help ",
         mesh.name,
         mesh.faces.len(),
-        state.zoom
+        state.zoom,
+        mesh.animations.len()
     );
     draw_text(
         area.x,
@@ -160,8 +259,11 @@ fn draw_help(area: Rect, buf: &mut Buffer) {
         " + / -         : zoom ",
         " m             : render mode ",
         " c             : color mode ",
+        " o             : projection ",
         " [ / ]         : brightness ",
         " space         : auto-spin ",
+        " p/n/b/0       : animation ",
+        " ,/. speed | v loop ",
         " r reset | ? help | q quit ",
     ];
     let width = lines.iter().map(|line| line.len()).max().unwrap_or(0) as u16 + 2;
@@ -230,5 +332,37 @@ mod tests {
                 frame.render_stateful_widget(Mesh3dWidget::new(&mesh), frame.area(), &mut state)
             })
             .unwrap();
+    }
+
+    #[test]
+    fn animation_state_advances_and_pauses() {
+        let mut state = Mesh3dState::default();
+        state.tick(0.5, &Mesh3dConfig::default());
+        assert_eq!(state.animation_time_seconds, 0.5);
+
+        state.toggle_animation_playback();
+        state.tick(0.5, &Mesh3dConfig::default());
+        assert_eq!(state.animation_time_seconds, 0.5);
+
+        state.adjust_animation_speed(2.0);
+        state.toggle_animation_playback();
+        state.tick(0.5, &Mesh3dConfig::default());
+        assert_eq!(state.animation_time_seconds, 1.5);
+
+        state.restart_animation();
+        assert_eq!(state.animation_time_seconds, 0.0);
+    }
+
+    #[test]
+    fn animation_selection_wraps() {
+        let mut state = Mesh3dState::default();
+        state.next_animation(3);
+        assert_eq!(state.selected_animation, Some(1));
+        state.previous_animation(3);
+        assert_eq!(state.selected_animation, Some(0));
+        state.previous_animation(3);
+        assert_eq!(state.selected_animation, Some(2));
+        state.clamp_animation_selection(0);
+        assert_eq!(state.selected_animation, None);
     }
 }
