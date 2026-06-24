@@ -23,6 +23,8 @@
 - `color_mode(ColorMode)`: `Material`, `Lighting`, `Texture`, `Auto`, or `Off`.
 - `light_direction([f32; 3])`: light vector.
 - `lighting(ambient, diffuse)`: light weights.
+
+- `color_brightness(f32)`: multiply truecolor RGB output; values above `1.0` make material, texture, and lighting colors easier to see in dim terminals.
 - `foreground_style(Style)`: fallback style.
 - `background_style(Option<Style>)`: optional clear style.
 
@@ -41,7 +43,7 @@ Available when the `textures` feature is enabled:
 - `texture_filter(TextureFilter)`: `Nearest` for speed or `Bilinear` for smoother sampling.
 - `texture_wrap(TextureWrap)`: `Repeat` or `Clamp` for UVs outside `[0, 1]`.
 - `flip_texture_v(bool)`: defaults true to handle common OBJ/image origin differences.
-- `texture_lighting(bool)`: multiply sampled RGB by mesh lighting.
+- `texture_lighting(bool)`: multiply sampled RGB by mesh lighting. If colors look too dark, either disable this or raise `color_brightness(...)`.
 
 Texture loading is configured through `MeshLoadOptions`:
 

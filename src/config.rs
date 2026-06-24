@@ -81,6 +81,10 @@ pub struct Mesh3dConfig {
     pub texture_wrap: TextureWrap,
     /// Flip V texture coordinates while sampling. Useful because OBJ and image origins often differ.
     pub flip_texture_v: bool,
+    /// Multiplier applied to truecolor material/texture/lighting RGB output.
+    /// Values above `1.0` are useful in terminals where colored glyphs look dim.
+    pub color_brightness: f32,
+
     /// Multiply sampled texture colors by terminal lighting intensity.
     pub texture_lighting: bool,
     /// Whether to fit the model to the visible area automatically.
@@ -126,6 +130,8 @@ impl Default for Mesh3dConfig {
             texture_wrap: TextureWrap::Repeat,
             flip_texture_v: true,
             texture_lighting: true,
+
+            color_brightness: 1.0,
             auto_fit: true,
             scale: 1.0,
             fov_y_degrees: 60.0,
@@ -216,6 +222,11 @@ impl Mesh3dConfig {
     #[must_use]
     pub fn texture_lighting(mut self, enabled: bool) -> Self {
         self.texture_lighting = enabled;
+        self
+    }
+    #[must_use]
+    pub fn color_brightness(mut self, brightness: f32) -> Self {
+        self.color_brightness = brightness.clamp(0.0, 8.0);
         self
     }
 

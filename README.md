@@ -129,6 +129,8 @@ Controls:
 | `+` / `-` | zoom |
 | `m` | cycle solid/wireframe/points |
 | `c` | cycle material/lighting/texture/auto/off color |
+
+| `[` / `]` | decrease/increase color brightness |
 | `space` | toggle auto-spin |
 | `r` | reset view |
 | `?` | help overlay |
@@ -155,7 +157,7 @@ STL files and OBJ/glTF primitives without UVs continue to render with material/l
 - `projection(ProjectionMode::{Perspective, Orthographic})`.
 - `color_mode(ColorMode::{Material, Lighting, Texture, Auto, Off})`.
 - `texture_filter(TextureFilter::{Nearest, Bilinear})`, `texture_wrap(TextureWrap::{Repeat, Clamp})`.
-- `flip_texture_v(...)`, `texture_lighting(...)`.
+- `flip_texture_v(...)`, `texture_lighting(...)`, `color_brightness(...)`.
 - `scale(...)`, `fov_y_degrees(...)`, `cell_aspect_ratio(...)`.
 - `backface_culling(...)`, `light_direction(...)`, `lighting(...)`.
 - `auto_spin([x, y, z])`, `max_faces(...)`.

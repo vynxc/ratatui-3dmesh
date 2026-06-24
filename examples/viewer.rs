@@ -93,6 +93,7 @@ fn run_app(
     };
     let mut config = Mesh3dConfig::default()
         .color_mode(initial_color)
+        .color_brightness(1.45)
         .auto_spin([0.0, 0.45, 0.0])
         .background_style(Some(Style::default().bg(Color::Black)));
     let mut last_tick = Instant::now();
@@ -115,7 +116,7 @@ fn run_app(
             let texture_status = texture_status(&mesh, texture_arg.as_ref());
             let status = Paragraph::new(vec![
                 Line::from(format!(
-                    "{} | vertices:{} faces:{} uvs:{} textures:{} | mode:{:?} color:{:?} | auto-spin:{}",
+                    "{} | vertices:{} faces:{} uvs:{} textures:{} | mode:{:?} color:{:?} brightness:{:.2} | auto-spin:{}",
                     mesh.name,
                     mesh.vertices.len(),
                     mesh.faces.len(),
@@ -123,10 +124,11 @@ fn run_app(
                     mesh.textures.len(),
                     config.render_mode,
                     config.color_mode,
+                    config.color_brightness,
                     state.auto_spin_enabled
                 )),
                 Line::from(texture_status),
-                Line::from(format!("last: {last_action} | arrows/WASD rotate, hjkl pan, +/- zoom, m/c toggles, ? help, q quit")),
+                Line::from(format!("last: {last_action} | arrows/WASD rotate, hjkl pan, +/- zoom, m/c toggles, [/] brightness, ? help, q quit")),
             ])
             .block(Block::default().borders(Borders::ALL).title("ratatui-3dmesh"));
             frame.render_widget(status, chunks[1]);
