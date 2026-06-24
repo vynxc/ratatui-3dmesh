@@ -3,7 +3,7 @@ name = "ratatui-3dmesh"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.74"
-description = "A reusable Ratatui widget for rendering OBJ/STL/glTF 3D meshes as shaded terminal ASCII."
+description = "A reusable Ratatui widget for rendering OBJ/glTF/GLB 3D meshes as shaded terminal ASCII."
 license = "MIT"
 readme = "README.md"
 repository = "https://github.com/your-org/ratatui-3dmesh"
@@ -11,9 +11,8 @@ keywords = ["ratatui", "tui", "3d", "ascii", "widget"]
 categories = ["command-line-interface", "rendering", "visualization"]
 
 [features]
-default = ["obj", "stl", "mtl"]
+default = ["obj", "mtl", "gltf", "textures"]
 obj = []
-stl = []
 mtl = []
 gltf = ["dep:gltf"]
 textures = ["dep:image"]

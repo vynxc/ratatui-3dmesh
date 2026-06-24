@@ -1,8 +1,7 @@
 //! Animation data and sampling helpers.
 //!
-//! glTF/GLB files can contain embedded node transform animation clips. OBJ and
-//! STL are static formats, so loaders for those formats leave
-//! [`crate::Mesh::animations`] empty.
+//! glTF/GLB files can contain embedded node transform animation clips. OBJ is a
+//! static format, so the OBJ loader leaves [`crate::Mesh::animations`] empty.
 
 use crate::model::{Bounds, Face, Mesh, Vec3};
 

@@ -5,6 +5,91 @@ use crate::{
     model::{Material, Texture},
 };
 
+/// Resolve the foreground RGB of a solid cell that has no per-cell texture sample.
+///
+/// Mirrors [`style_for`] but returns raw RGB so the solid path can composite emissive
+/// color and alpha on top before handing a final color to the rasterizer.
+pub(super) fn solid_base_rgb(
+    material: Option<&Material>,
+    intensity: f32,
+    config: &Mesh3dConfig,
+) -> [u8; 3] {
+    match config.color_mode {
+        ColorMode::Off | ColorMode::Texture | ColorMode::Auto => material
+            .filter(|_| !matches!(config.color_mode, ColorMode::Off))
+            .map_or_else(
+                || foreground_rgb(config),
+                |material| brighten_rgb(material_rgb(material), config.color_brightness),
+            ),
+        ColorMode::Material => material.map_or_else(
+            || foreground_rgb(config),
+            |material| brighten_rgb(material_rgb(material), config.color_brightness),
+        ),
+        ColorMode::Lighting => {
+            let value = brighten_channel(
+                unit_to_channel(intensity.clamp(0.0, 1.0)),
+                config.color_brightness,
+            );
+            [value, value, value]
+        }
+    }
+}
+
+/// Emissive RGB contribution for a cell, combining the material factor with an optional
+/// emissive texture sample. Returns `[0, 0, 0]` when the material does not emit.
+pub(super) fn emissive_rgb(
+    material: Option<&Material>,
+    sample: Option<[u8; 4]>,
+    config: &Mesh3dConfig,
+) -> [u8; 3] {
+    let Some(material) = material else {
+        return [0, 0, 0];
+    };
+    if !material.is_emissive() {
+        return [0, 0, 0];
+    }
+    let factor = material.emissive;
+    let texel = sample.map_or([1.0, 1.0, 1.0], |rgba| {
+        [
+            f32::from(rgba[0]) / 255.0,
+            f32::from(rgba[1]) / 255.0,
+            f32::from(rgba[2]) / 255.0,
+        ]
+    });
+    brighten_rgb(
+        [
+            (factor[0] * texel[0] * 255.0).round().clamp(0.0, 255.0) as u8,
+            (factor[1] * texel[1] * 255.0).round().clamp(0.0, 255.0) as u8,
+            (factor[2] * texel[2] * 255.0).round().clamp(0.0, 255.0) as u8,
+        ],
+        config.color_brightness,
+    )
+}
+
+/// Add emissive light on top of an already-lit base color, saturating at white.
+pub(super) fn add_emissive(base: [u8; 3], emissive: [u8; 3]) -> [u8; 3] {
+    [
+        base[0].saturating_add(emissive[0]),
+        base[1].saturating_add(emissive[1]),
+        base[2].saturating_add(emissive[2]),
+    ]
+}
+
+fn foreground_rgb(config: &Mesh3dConfig) -> [u8; 3] {
+    match config.foreground_style.fg {
+        Some(Color::Rgb(r, g, b)) => [r, g, b],
+        _ => [255, 255, 255],
+    }
+}
+
+fn material_rgb(material: &Material) -> [u8; 3] {
+    [
+        (material.diffuse[0].clamp(0.0, 1.0) * 255.0).round() as u8,
+        (material.diffuse[1].clamp(0.0, 1.0) * 255.0).round() as u8,
+        (material.diffuse[2].clamp(0.0, 1.0) * 255.0).round() as u8,
+    ]
+}
+
 /// Select the foreground style for non-filled-texture drawing paths.
 pub(super) fn style_for(
     material: Option<&Material>,

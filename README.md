@@ -4,12 +4,12 @@ A reusable [Ratatui](https://ratatui.rs/) widget for viewing 3D meshes as shaded
 
 `ratatui-3dmesh` is inspired by:
 
-- [`autopawn/3d-ascii-viewer`](https://github.com/autopawn/3d-ascii-viewer) — C/ncurses OBJ/STL ASCII rendering with optional MTL diffuse colors.
+- [`autopawn/3d-ascii-viewer`](https://github.com/autopawn/3d-ascii-viewer) — C/ncurses OBJ ASCII rendering with optional MTL diffuse colors.
 - [`luisbedoia/sx3d`](https://github.com/luisbedoia/sx3d) — a simple Rust console 3D viewer UX.
 
 This crate is built for embedding. Your app owns terminal initialization, layout, and event loops; this crate provides mesh loading, configuration, rendering, state, and optional crossterm controls.
 
-> Status: early public crate. OBJ/STL/glTF/MTL, glTF node animation playback, UV parsing, optional texture images, solid/wire/point modes, color policies, controls, docs, and an example viewer are included.
+> Status: early public crate. Supports OBJ (with companion MTL) and glTF/GLB, glTF node animation playback and CPU skinning, material-aware rendering (double-sided, alpha mask/blend, emissive), UV parsing, texture images, solid/wire/point modes, color policies, controls, docs, and an example viewer.
 
 ## Install
 
@@ -19,24 +19,21 @@ ratatui-3dmesh = "0.1"
 ratatui = "0.29"
 ```
 
-For keyboard helpers based on crossterm:
+The default features (`obj`, `mtl`, `gltf`, `textures`) load OBJ and glTF/GLB with textures out of the box. For keyboard helpers based on crossterm, add the `cli-example` feature:
 
 ```toml
 ratatui-3dmesh = { version = "0.1", features = ["cli-example"] }
 ```
 
-For PNG/JPEG texture images:
+To trim the build to a single format, disable defaults and opt in:
 
 ```toml
-ratatui-3dmesh = { version = "0.1", features = ["textures"] }
+# OBJ only
+ratatui-3dmesh = { version = "0.1", default-features = false, features = ["obj", "mtl"] }
+
+# glTF/GLB only
+ratatui-3dmesh = { version = "0.1", default-features = false, features = ["gltf", "textures"] }
 ```
-
-For glTF/GLB loading:
-
-```toml
-ratatui-3dmesh = { version = "0.1", features = ["gltf"] }
-```
-
 
 ## Use as a Ratatui widget
 
@@ -91,34 +88,57 @@ The texture loader sniffs image bytes instead of trusting the extension, so a PN
 
 ## glTF usage
 
-glTF support is available through the optional `gltf` feature. The loader reads `.gltf`/`.glb` mesh primitives, indices, normals, UVs, base-color factors, and base-color textures when `textures` is also enabled.
+glTF/GLB is supported by default (the `gltf` + `textures` features). `Mesh::load("scene.gltf")` reads mesh primitives, indices, normals, UVs, and full PBR material metadata: base-color factor/texture, `alphaMode` (OPAQUE/MASK/BLEND), `alphaCutoff`, `doubleSided`, and emissive factor/texture. Embedded images are decoded automatically — no opt-in flag needed.
 
-Embedded glTF/GLB animations are imported as `mesh.animations`. This first pass supports node translation, rotation, and scale channels with linear or step interpolation, including CPU skinning for glTF meshes with `JOINTS_0`/`WEIGHTS_0`. Morph-target weights and cubic-spline interpolation are left as follow-up scope.
+The renderer is material-aware, so authored details survive into the terminal:
+
+- `doubleSided` materials are never back-face culled (hair cards, eye/brow decals).
+- `MASK` materials cut out below `alphaCutoff`; `BLEND` materials composite over the geometry behind them in a back-to-front pass.
+- Emissive factors and emissive textures add light on top of the lit base color, keeping glowing detail (eye irises, screens) visible even under dim lighting.
+
+```rust,no_run
+use ratatui_3dmesh::Mesh;
+
+# fn load() -> ratatui_3dmesh::Result<Mesh> {
+let mesh = Mesh::load("models/shantae/scene.gltf")?;
+# Ok(mesh)
+# }
+```
+
+Embedded glTF/GLB animations are imported as `mesh.animations`. This pass supports node translation, rotation, and scale channels with linear or step interpolation, including CPU skinning for glTF meshes with `JOINTS_0`/`WEIGHTS_0`. Morph-target weights and cubic-spline interpolation are left as follow-up scope.
 
 Run the axe asset:
 
 ```bash
-cargo run --release --example viewer --features "cli-example gltf textures" -- \
+cargo run --release --example viewer --features cli-example -- \
   models/axe/scene.gltf
 ```
+
+### glTF compatibility sweep
+
+To validate against a broad corpus of real-world models, fetch the Khronos sample assets and run the ignored compatibility test:
+
+```bash
+./scripts/fetch-gltf-corpus.sh
+GLTF_CORPUS_DIR=models/corpus cargo test --test gltf_corpus \
+  --features "gltf textures" -- --ignored --nocapture
+```
+
+The test loads every `.gltf`/`.glb` under `GLTF_CORPUS_DIR` and fails on any that error or produce no geometry. Normal `cargo test` runs stay offline and skip it.
 
 ## Run the example viewer
 
 ```bash
 cargo run --example viewer --features cli-example
 cargo run --example viewer --features cli-example -- examples/assets/pyramid.obj
-cargo run --example viewer --features cli-example -- examples/assets/tetra.stl
+cargo run --release --example viewer --features cli-example -- models/shantae/scene.gltf
 ```
 
-Run with texture support:
+Manual texture override (OBJ with UVs but no usable MTL):
 
 ```bash
-cargo run --release --example viewer --features "cli-example textures" -- \
+cargo run --release --example viewer --features cli-example -- \
   models/model.obj --texture models/AXEE_LP_exported_Base_color.jpg
-
-
-cargo run --release --example viewer --features "cli-example gltf textures" -- \
-  models/axe/scene.gltf
 ```
 
 Controls:
@@ -149,11 +169,10 @@ Controls:
 | --- | --- |
 | OBJ | vertices, texture coordinates, normals, polygon faces, negative indices, `usemtl`, companion `mtllib` |
 | MTL | `newmtl`, diffuse `Kd` colors, diffuse `map_Kd` texture paths |
-| Textures | optional PNG/JPEG decode to RGBA8 via the `textures` feature; manual `--texture` override supported |
-| glTF/GLB | mesh primitives, indices, normals, UVs, base-color factors, node TRS animations, base-color textures with `gltf` + `textures` |
-| STL | ASCII STL and binary STL |
+| glTF/GLB | mesh primitives, indices, normals, UVs, PBR base-color factor/texture, `alphaMode`/`alphaCutoff`, `doubleSided`, emissive factor/texture, node TRS animations, and CPU skinning |
+| Textures | embedded glTF images and PNG/JPEG files decode to RGBA8 via the `textures` feature; manual `--texture` override supported for OBJ |
 
-STL and OBJ are static formats in this crate and expose `mesh.animations.is_empty()`. STL files and OBJ/glTF primitives without UVs continue to render with material/lighting/grayscale modes.
+OBJ is a static format and exposes `mesh.animations.is_empty()`. OBJ and glTF primitives without UVs render with material/lighting/grayscale modes.
 
 ## Configuration highlights
 
@@ -182,10 +201,9 @@ let pretty = Mesh3dConfig::quality();
 | Feature | Default | Description |
 | --- | --- | --- |
 | `obj` | yes | Wavefront OBJ loading |
-| `stl` | yes | ASCII/binary STL loading |
 | `mtl` | yes | OBJ material diffuse-color and `map_Kd` metadata loading |
-| `gltf` | no | glTF/GLB mesh, material, UV, and base-color texture loading |
-| `textures` | no | PNG/JPEG texture image decoding and texture-colored rendering |
+| `gltf` | yes | glTF/GLB mesh, material, UV, animation, and skinning loading |
+| `textures` | yes | PNG/JPEG and embedded glTF texture decoding and texture-colored rendering |
 | `serde` | no | serialize/deserialize public config/model/state types where practical |
 | `cli-example` | no | crossterm keyboard control helpers and example support |
 

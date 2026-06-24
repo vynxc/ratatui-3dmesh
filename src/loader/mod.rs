@@ -9,8 +9,6 @@ pub mod gltf;
 pub mod mtl;
 #[cfg(feature = "obj")]
 pub mod obj;
-#[cfg(feature = "stl")]
-pub mod stl;
 #[cfg(feature = "textures")]
 pub mod texture;
 
@@ -75,10 +73,37 @@ pub fn load_with_options(path: &Path, options: &MeshLoadOptions) -> Result<Mesh>
         "gltf" | "glb" => gltf::load_gltf(path, options),
         #[cfg(feature = "obj")]
         "obj" => obj::load_obj_with_options(path, options),
-        #[cfg(feature = "stl")]
-        "stl" => stl::load_stl(path),
         _ => Err(Error::UnsupportedFormat {
             path: path.to_path_buf(),
         }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rejects_unsupported_formats() {
+        // STL is no longer supported; only .obj/.gltf/.glb dispatch.
+        for ext in ["stl", "ply", "fbx", "3ds"] {
+            let path = PathBuf::from(format!("model.{ext}"));
+            let err = load(&path).unwrap_err();
+            assert!(
+                matches!(err, Error::UnsupportedFormat { .. }),
+                "{ext} should be unsupported, got {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn unsupported_format_message_lists_supported_extensions() {
+        let err = load(Path::new("model.obj.unknownext")).unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains(".obj"));
+        assert!(message.contains(".gltf"));
+        assert!(message.contains(".glb"));
+        // STL must no longer be advertised as a supported format.
+        assert!(!message.contains(".stl"));
     }
 }

@@ -53,7 +53,7 @@ cargo run --release --example viewer --features "cli-example textures" -- \
 
 ## glTF / GLB
 
-The optional `gltf` feature enables `.gltf` and `.glb` loading.
+The `gltf` feature (on by default) enables `.gltf` and `.glb` loading.
 
 Supported:
 
@@ -62,30 +62,24 @@ Supported:
 - Node translation/rotation/scale animation clips with step or linear interpolation
 - CPU skinning for meshes with `JOINTS_0` and `WEIGHTS_0`
 - Vertex positions, normals, and UV set 0
-- PBR base-color factors as material diffuse colors
-- PBR base-color textures when `textures` is also enabled
+- PBR base-color factor and base-color texture
+- `alphaMode` (OPAQUE/MASK/BLEND), `alphaCutoff`, and `doubleSided`
+- Emissive factor and emissive texture
+- Embedded images, decoded automatically when the `textures` feature is enabled
 
-Imported clips are exposed as `mesh.animations`. Advanced glTF animation features such as morph-target weights and cubic-spline interpolation are not evaluated in this first pass.
+The renderer honors these material semantics: double-sided surfaces are never back-face culled, masked surfaces cut out below the cutoff, blended surfaces composite back-to-front, and emissive contributions are added on top of the lit color.
+
+Imported clips are exposed as `mesh.animations`. Advanced glTF animation features such as morph-target weights and cubic-spline interpolation are not evaluated in this pass.
 
 Example:
 
 ```bash
-cargo run --release --example viewer --features "cli-example gltf textures" -- \
-  models/axe/scene.gltf
+cargo run --release --example viewer --features cli-example -- \
+  models/shantae/scene.gltf
 ```
 
-
-## STL
-
-Supported:
-
-- ASCII STL
-- Binary STL
-- Facet normals when present
-
-STL does not carry UV texture coordinates in this loader, so STL renders with material/lighting/foreground color modes.
-
-OBJ and STL do not normally contain embedded animation, so their loaders return static meshes with `mesh.animations.is_empty()`.
+To sweep a broad corpus of real-world models, see `scripts/fetch-gltf-corpus.sh` and the
+`tests/gltf_corpus.rs` ignored test.
 
 ## Tips
 

@@ -8,7 +8,7 @@ use crate::{
         NodeTransform, Quaternion, SkinBinding, SkinnedVertex,
     },
     loader::MeshLoadOptions,
-    model::{Face, Material, Mesh, TextureRef, Vec2, Vec3},
+    model::{AlphaMode, Face, Material, Mesh, TextureRef, Vec2, Vec3},
     Error, Result,
 };
 
@@ -95,11 +95,27 @@ fn collect_materials(path: &Path, document: &gltf::Document) -> Vec<Material> {
                 .map_or_else(|| format!("material_{index}"), ToOwned::to_owned);
             let mut output = Material::new(name);
             let pbr = material.pbr_metallic_roughness();
-            let [red, green, blue, _alpha] = pbr.base_color_factor();
+            let [red, green, blue, alpha] = pbr.base_color_factor();
             output.diffuse = [red, green, blue];
+            output.base_color_alpha = alpha;
+            output.double_sided = material.double_sided();
+            output.alpha_mode = match material.alpha_mode() {
+                gltf::material::AlphaMode::Opaque => AlphaMode::Opaque,
+                gltf::material::AlphaMode::Mask => AlphaMode::Mask,
+                gltf::material::AlphaMode::Blend => AlphaMode::Blend,
+            };
+            output.alpha_cutoff = material.alpha_cutoff().unwrap_or(0.5);
+            output.emissive = material.emissive_factor();
             if let Some(info) = pbr.base_color_texture() {
                 let source = info.texture().source();
                 output.diffuse_texture = Some(TextureRef {
+                    path: image_path(path, source.index(), image_uri(source.source())),
+                    index: Some(source.index()),
+                });
+            }
+            if let Some(info) = material.emissive_texture() {
+                let source = info.texture().source();
+                output.emissive_texture = Some(TextureRef {
                     path: image_path(path, source.index(), image_uri(source.source())),
                     index: Some(source.index()),
                 });
@@ -536,48 +552,121 @@ fn import_channel(
 #[cfg(feature = "textures")]
 fn load_textures(
     path: &Path,
-    options: &MeshLoadOptions,
+    _options: &MeshLoadOptions,
     images: &[gltf::image::Data],
 ) -> Result<Vec<Texture>> {
-    if options.load_material_textures {
-        images
-            .iter()
-            .enumerate()
-            .map(|(index, image)| gltf_image_to_texture(path, index, image))
-            .collect()
-    } else {
-        Ok(Vec::new())
-    }
+    // glTF images are embedded and already decoded by `gltf::import`, so always load them.
+    // `load_material_textures` stays an OBJ/MTL concern. Every glTF pixel format converts
+    // to RGBA8, so this cannot fail per-image.
+    Ok(images
+        .iter()
+        .enumerate()
+        .map(|(index, image)| gltf_image_to_texture(path, index, image))
+        .collect())
 }
 
 #[cfg(feature = "textures")]
-fn gltf_image_to_texture(path: &Path, index: usize, image: &gltf::image::Data) -> Result<Texture> {
-    let rgba = match image.format {
-        gltf::image::Format::R8 => image.pixels.iter().flat_map(|&v| [v, v, v, 255]).collect(),
-        gltf::image::Format::R8G8 => image
+fn gltf_image_to_texture(path: &Path, index: usize, image: &gltf::image::Data) -> Texture {
+    Texture::new(
+        image_path(path, index, None),
+        image.width,
+        image.height,
+        convert_image_rgba(image),
+    )
+}
+
+#[cfg(feature = "textures")]
+fn convert_image_rgba(image: &gltf::image::Data) -> Vec<u8> {
+    use gltf::image::Format;
+    match image.format {
+        Format::R8 => image.pixels.iter().flat_map(|&v| [v, v, v, 255]).collect(),
+        Format::R8G8 => image
             .pixels
             .chunks_exact(2)
             .flat_map(|p| [p[0], p[0], p[0], p[1]])
             .collect(),
-        gltf::image::Format::R8G8B8 => image
+        Format::R8G8B8 => image
             .pixels
             .chunks_exact(3)
             .flat_map(|p| [p[0], p[1], p[2], 255])
             .collect(),
-        gltf::image::Format::R8G8B8A8 => image.pixels.clone(),
-        other => {
-            return Err(Error::texture_decode(
-                image_path(path, index, None),
-                format!("unsupported glTF image format {other:?}"),
-            ))
-        }
-    };
-    Ok(Texture::new(
-        image_path(path, index, None),
-        image.width,
-        image.height,
-        rgba,
-    ))
+        Format::R8G8B8A8 => image.pixels.clone(),
+        Format::R16 => image
+            .pixels
+            .chunks_exact(2)
+            .flat_map(|p| {
+                let v = u16_to_u8(p);
+                [v, v, v, 255]
+            })
+            .collect(),
+        Format::R16G16 => image
+            .pixels
+            .chunks_exact(4)
+            .flat_map(|p| {
+                let r = u16_to_u8(&p[0..2]);
+                [r, r, r, u16_to_u8(&p[2..4])]
+            })
+            .collect(),
+        Format::R16G16B16 => image
+            .pixels
+            .chunks_exact(6)
+            .flat_map(|p| {
+                [
+                    u16_to_u8(&p[0..2]),
+                    u16_to_u8(&p[2..4]),
+                    u16_to_u8(&p[4..6]),
+                    255,
+                ]
+            })
+            .collect(),
+        Format::R16G16B16A16 => image
+            .pixels
+            .chunks_exact(8)
+            .flat_map(|p| {
+                [
+                    u16_to_u8(&p[0..2]),
+                    u16_to_u8(&p[2..4]),
+                    u16_to_u8(&p[4..6]),
+                    u16_to_u8(&p[6..8]),
+                ]
+            })
+            .collect(),
+        Format::R32G32B32FLOAT => image
+            .pixels
+            .chunks_exact(12)
+            .flat_map(|p| {
+                [
+                    f32_to_u8(&p[0..4]),
+                    f32_to_u8(&p[4..8]),
+                    f32_to_u8(&p[8..12]),
+                    255,
+                ]
+            })
+            .collect(),
+        Format::R32G32B32A32FLOAT => image
+            .pixels
+            .chunks_exact(16)
+            .flat_map(|p| {
+                [
+                    f32_to_u8(&p[0..4]),
+                    f32_to_u8(&p[4..8]),
+                    f32_to_u8(&p[8..12]),
+                    f32_to_u8(&p[12..16]),
+                ]
+            })
+            .collect(),
+    }
+}
+
+#[cfg(feature = "textures")]
+fn u16_to_u8(bytes: &[u8]) -> u8 {
+    (u16::from_le_bytes([bytes[0], bytes[1]]) >> 8) as u8
+}
+
+#[cfg(feature = "textures")]
+fn f32_to_u8(bytes: &[u8]) -> u8 {
+    let value = f32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+    (value.clamp(0.0, 1.0) * 255.0).round() as u8
 }
 
 #[cfg(test)]
@@ -606,16 +695,67 @@ mod tests {
         if !path.exists() {
             return;
         }
-        let mesh = load_gltf(
-            path,
-            &MeshLoadOptions::default().load_material_textures(true),
-        )
-        .unwrap();
+        // glTF images are embedded; default options must load textures without opting in.
+        let mesh = load_gltf(path, &MeshLoadOptions::default()).unwrap();
         assert!(!mesh.vertices.is_empty());
         assert!(!mesh.faces.is_empty());
         assert!(!mesh.tex_coords.is_empty());
         #[cfg(feature = "textures")]
         assert!(!mesh.textures.is_empty());
+    }
+
+    #[cfg(feature = "textures")]
+    #[test]
+    fn imports_shantae_material_semantics_when_present() {
+        let path = Path::new("models/shantae/scene.gltf");
+        if !path.exists() {
+            return;
+        }
+        let mesh = load_gltf(path, &MeshLoadOptions::default()).unwrap();
+
+        // Textures load by default for glTF.
+        assert!(!mesh.textures.is_empty(), "embedded images must load");
+
+        let material = |name: &str| mesh.materials.iter().find(|m| m.name == name).unwrap();
+
+        // Hair is double-sided: previously its back-facing cards were culled and vanished.
+        let hair = material("MAT_HAIR");
+        assert!(hair.double_sided, "hair must be double-sided");
+        assert!(
+            hair.diffuse_texture
+                .as_ref()
+                .and_then(|t| t.index)
+                .is_some(),
+            "hair base-color texture must resolve to a loaded index"
+        );
+
+        // Eyes are BLEND + double-sided + emissive: they were flattening to white.
+        for eye in ["MAT_EYE_R", "MAT_EYE_L"] {
+            let m = material(eye);
+            assert_eq!(m.alpha_mode, AlphaMode::Blend, "{eye} should be BLEND");
+            assert!(m.double_sided, "{eye} should be double-sided");
+            assert!(m.is_emissive(), "{eye} should carry emissive detail");
+            assert!(
+                m.emissive_texture.as_ref().and_then(|t| t.index).is_some(),
+                "{eye} emissive texture must resolve"
+            );
+        }
+
+        // Transparent clothing carries a sub-1.0 base-color alpha.
+        let pant = material("MAT_TRANSP_PANT_L");
+        assert_eq!(pant.alpha_mode, AlphaMode::Blend);
+        assert!(pant.base_color_alpha < 1.0);
+
+        // Every material with a base-color texture resolves to a valid loaded texture.
+        for material in &mesh.materials {
+            if let Some(index) = material.diffuse_texture.as_ref().and_then(|t| t.index) {
+                assert!(
+                    mesh.textures.get(index).is_some(),
+                    "material {} references missing texture {index}",
+                    material.name
+                );
+            }
+        }
     }
 
     #[test]
