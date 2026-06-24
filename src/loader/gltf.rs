@@ -113,6 +113,22 @@ fn collect_materials(path: &Path, document: &gltf::Document) -> Vec<Material> {
                     index: Some(source.index()),
                 });
             }
+            // Some assets use the deprecated KHR_materials_pbrSpecularGlossiness
+            // extension, which carries the diffuse color/texture instead of the
+            // standard metallic-roughness block. Pull those values in as the
+            // base color when present.
+            if let Some(sg) = material.pbr_specular_glossiness() {
+                let [red, green, blue, alpha] = sg.diffuse_factor();
+                output.diffuse = [red, green, blue];
+                output.base_color_alpha = alpha;
+                if let Some(info) = sg.diffuse_texture() {
+                    let source = info.texture().source();
+                    output.diffuse_texture = Some(TextureRef {
+                        path: image_path(path, source.index(), image_uri(source.source())),
+                        index: Some(source.index()),
+                    });
+                }
+            }
             if let Some(info) = material.emissive_texture() {
                 let source = info.texture().source();
                 output.emissive_texture = Some(TextureRef {
