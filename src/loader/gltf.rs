@@ -106,6 +106,14 @@ fn collect_materials(path: &Path, document: &gltf::Document) -> Vec<Material> {
             };
             output.alpha_cutoff = material.alpha_cutoff().unwrap_or(0.5);
             output.emissive = material.emissive_factor();
+            // KHR_materials_emissive_strength scales the emissive factor, often
+            // far above 1.0 for HDR bloom. The terminal has no HDR range, so fold
+            // the multiplier in and let downstream clamping cap it at full bright.
+            if let Some(strength) = material.emissive_strength() {
+                output.emissive = output.emissive.map(|channel| channel * strength);
+            }
+            // KHR_materials_unlit: render the base color flat, ignoring lighting.
+            output.unlit = material.unlit();
             if let Some(info) = pbr.base_color_texture() {
                 let source = info.texture().source();
                 output.diffuse_texture = Some(TextureRef {
@@ -262,9 +270,11 @@ fn append_primitive(
     let uvs = reader
         .read_tex_coords(0)
         .map_or_else(Vec::new, |coords| coords.into_f32().collect::<Vec<_>>());
-    geometry
-        .tex_coords
-        .extend(uvs.iter().map(|uv| Vec2::new(uv[0], uv[1])));
+    let uv_transform = diffuse_uv_transform(&primitive.material());
+    geometry.tex_coords.extend(uvs.iter().map(|uv| {
+        let [u, v] = uv_transform.map_or(*uv, |t| t.apply(*uv));
+        Vec2::new(u, v)
+    }));
 
     let read_normals = reader
         .read_normals()
@@ -468,6 +478,46 @@ fn image_path(path: &Path, index: usize, uri: Option<&str>) -> PathBuf {
         || PathBuf::from(format!("gltf-image-{index}")),
         |uri| path.parent().unwrap_or_else(|| Path::new(".")).join(uri),
     )
+}
+
+/// A `KHR_texture_transform` UV transform (offset, rotation, scale) applied at load
+/// time so the renderer never needs to know about the extension.
+#[derive(Clone, Copy)]
+struct UvTransform {
+    offset: [f32; 2],
+    rotation: f32,
+    scale: [f32; 2],
+}
+
+impl UvTransform {
+    /// Transform a UV coordinate using the glTF convention:
+    /// `uv' = translation * rotation * scale * uv` (rotation is counter-clockwise).
+    fn apply(self, uv: [f32; 2]) -> [f32; 2] {
+        let [su, sv] = [uv[0] * self.scale[0], uv[1] * self.scale[1]];
+        let (sin, cos) = self.rotation.sin_cos();
+        [
+            cos * su + sin * sv + self.offset[0],
+            -sin * su + cos * sv + self.offset[1],
+        ]
+    }
+}
+
+/// Read the `KHR_texture_transform` applied to a material's base-color (diffuse)
+/// texture, including the diffuse texture of the spec-gloss extension. Returns
+/// `None` when the extension is absent or an identity transform.
+fn diffuse_uv_transform(material: &gltf::Material<'_>) -> Option<UvTransform> {
+    let info = material.pbr_metallic_roughness().base_color_texture();
+    let info = info.or_else(|| {
+        material
+            .pbr_specular_glossiness()
+            .and_then(|sg| sg.diffuse_texture())
+    })?;
+    let transform = info.texture_transform()?;
+    Some(UvTransform {
+        offset: transform.offset(),
+        rotation: transform.rotation(),
+        scale: transform.scale(),
+    })
 }
 
 fn transform_point(matrix: [[f32; 4]; 4], point: [f32; 3]) -> Vec3 {
@@ -690,6 +740,37 @@ mod tests {
     use super::*;
     use crate::animation::{sample_mesh_animation, AnimatedProperty};
     use std::{fs, time::SystemTime};
+
+    #[test]
+    fn uv_transform_applies_scale_offset_rotation() {
+        // Identity transform leaves UVs untouched.
+        let identity = UvTransform {
+            offset: [0.0, 0.0],
+            rotation: 0.0,
+            scale: [1.0, 1.0],
+        };
+        assert_eq!(identity.apply([0.25, 0.75]), [0.25, 0.75]);
+
+        // Scale then offset.
+        let scaled = UvTransform {
+            offset: [0.1, 0.2],
+            rotation: 0.0,
+            scale: [2.0, 3.0],
+        };
+        let [u, v] = scaled.apply([0.5, 0.5]);
+        assert!((u - 1.1).abs() < 1e-6, "u = {u}");
+        assert!((v - 1.7).abs() < 1e-6, "v = {v}");
+
+        // 90 degree counter-clockwise rotation maps (1, 0) -> (0, -1).
+        let rotated = UvTransform {
+            offset: [0.0, 0.0],
+            rotation: std::f32::consts::FRAC_PI_2,
+            scale: [1.0, 1.0],
+        };
+        let [u, v] = rotated.apply([1.0, 0.0]);
+        assert!(u.abs() < 1e-6, "u = {u}");
+        assert!((v + 1.0).abs() < 1e-6, "v = {v}");
+    }
 
     #[test]
     fn transforms_points() {

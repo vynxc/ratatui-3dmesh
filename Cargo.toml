@@ -25,7 +25,22 @@ thiserror = "2"
 serde = { version = "1", features = ["derive"], optional = true }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"], optional = true }
 gltf = { version = "1", optional = true, features = [
+    # Pure-JSON Khronos extensions: enabling these costs no extra binary size
+    # (no decoder crates) but lets the importer accept any model that lists one
+    # as `extensionsRequired`, instead of hard-failing validation. Geometry
+    # compression (Draco, meshopt) and GPU texture formats (KTX2/basisu) are
+    # intentionally omitted: the crate cannot decode them and they would pull in
+    # heavy dependencies.
+    "KHR_lights_punctual",
+    "KHR_materials_emissive_strength",
+    "KHR_materials_ior",
     "KHR_materials_pbrSpecularGlossiness",
+    "KHR_materials_specular",
+    "KHR_materials_transmission",
+    "KHR_materials_unlit",
+    "KHR_materials_variants",
+    "KHR_materials_volume",
+    "KHR_texture_transform",
 ] }
 
 crossterm = { version = "0.28", optional = true }

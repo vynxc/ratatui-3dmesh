@@ -301,10 +301,15 @@ fn shade_cell(
         return None;
     }
 
-    // Lit base color.
+    // Lit base color. Unlit materials (KHR_materials_unlit) ignore scene
+    // lighting and show their flat base color, so drive shading at full
+    // intensity. Lighting-only mode discards material color by design, so it is
+    // left untouched.
+    let unlit = material.is_some_and(|m| m.unlit) && !matches!(config.color_mode, ColorMode::Lighting);
+    let shade_intensity = if unlit { 1.0 } else { shading.intensity };
     let lit = diffuse_sample.map_or_else(
-        || lit_solid_rgb(material, shading.intensity, config),
-        |rgba| texture_rgb(rgba, shading.intensity, config),
+        || lit_solid_rgb(material, shade_intensity, config),
+        |rgba| texture_rgb(rgba, shade_intensity, config),
     );
 
     // Emissive contribution keeps authored glowing detail (eye irises) visible even when
