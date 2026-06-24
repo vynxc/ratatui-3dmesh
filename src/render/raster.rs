@@ -91,6 +91,17 @@ pub fn fill_triangle(
     ch: char,
     style: Style,
 ) {
+    fill_triangle_with(area, buf, zbuf, tri, |_, _| (ch, style));
+}
+
+/// Fill a projected triangle and choose the glyph/style per covered cell.
+pub fn fill_triangle_with(
+    area: Rect,
+    buf: &mut Buffer,
+    zbuf: &mut [f32],
+    tri: [ProjectedVertex; 3],
+    mut paint: impl FnMut([f32; 3], f32) -> (char, Style),
+) {
     let [a, b, c] = tri;
     let min_x = a.x.min(b.x).min(c.x).floor().max(0.0) as i32;
     let max_x =
@@ -106,6 +117,7 @@ pub fn fill_triangle(
             .min(f32::from(area.height.saturating_sub(1))) as i32;
     let denom = edge(a.x, a.y, b.x, b.y, c.x, c.y);
     if denom.abs() <= f32::EPSILON {
+        let (ch, style) = paint([1.0, 0.0, 0.0], a.depth);
         draw_line(area, buf, zbuf, a, b, ch, style);
         draw_line(area, buf, zbuf, b, c, ch, style);
         draw_line(area, buf, zbuf, c, a, ch, style);
@@ -121,6 +133,7 @@ pub fn fill_triangle(
             let w2 = edge(a.x, a.y, b.x, b.y, px, py) / denom;
             if w0 >= -0.0001 && w1 >= -0.0001 && w2 >= -0.0001 {
                 let depth = w0.mul_add(a.depth, w1.mul_add(b.depth, w2 * c.depth));
+                let (ch, style) = paint([w0, w1, w2], depth);
                 plot_i32(area, buf, zbuf, CellPoint { x, y, depth }, ch, style);
             }
         }

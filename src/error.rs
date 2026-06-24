@@ -46,12 +46,22 @@ pub enum Error {
         message: String,
     },
 
+    /// Image texture could not be decoded.
+    #[error("failed to decode texture {path}: {message}")]
+    TextureDecode {
+        /// Texture image path.
+        path: PathBuf,
+        /// Human readable message.
+        message: String,
+    },
+
     /// A mesh has no usable geometry.
     #[error("mesh has no faces or vertices")]
     EmptyMesh,
 }
 
 impl Error {
+    #[allow(dead_code)]
     pub(crate) fn io(path: impl Into<PathBuf>, source: io::Error) -> Self {
         Self::Io {
             path: path.into(),
@@ -59,6 +69,7 @@ impl Error {
         }
     }
 
+    #[allow(dead_code)]
     pub(crate) fn parse(
         path: impl Into<PathBuf>,
         line: Option<usize>,
@@ -67,6 +78,14 @@ impl Error {
         Self::Parse {
             path: path.into(),
             line,
+            message: message.into(),
+        }
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn texture_decode(path: impl Into<PathBuf>, message: impl Into<String>) -> Self {
+        Self::TextureDecode {
+            path: path.into(),
             message: message.into(),
         }
     }

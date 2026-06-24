@@ -28,9 +28,10 @@ pub mod model;
 pub mod render;
 pub mod widget;
 
-pub use config::{ColorMode, Mesh3dConfig, ProjectionMode, RenderMode};
+pub use config::{ColorMode, Mesh3dConfig, ProjectionMode, RenderMode, TextureFilter, TextureWrap};
 #[cfg(feature = "cli-example")]
 pub use controls::{ControlAction, ControlMap};
 pub use error::{Error, Result};
-pub use model::{Bounds, Face, Material, Mesh, Vec3};
+pub use loader::MeshLoadOptions;
+pub use model::{Bounds, Face, Material, Mesh, Texture, TextureRef, Vec2, Vec3};
 pub use widget::{Mesh3dState, Mesh3dWidget};

@@ -1,6 +1,6 @@
 # ratatui-3dmesh
 
-A reusable [Ratatui](https://ratatui.rs/) widget for viewing 3D meshes as shaded terminal ASCII.
+A reusable [Ratatui](https://ratatui.rs/) widget for viewing 3D meshes as shaded terminal ASCII with optional truecolor texture output.
 
 `ratatui-3dmesh` is inspired by:
 
@@ -9,7 +9,7 @@ A reusable [Ratatui](https://ratatui.rs/) widget for viewing 3D meshes as shaded
 
 This crate is built for embedding. Your app owns terminal initialization, layout, and event loops; this crate provides mesh loading, configuration, rendering, state, and optional crossterm controls.
 
-> Status: early public crate scaffold. OBJ/STL/MTL, solid/wire/point modes, color policies, controls, docs, and an example viewer are included.
+> Status: early public crate. OBJ/STL/MTL, UV parsing, optional texture images, solid/wire/point modes, color policies, controls, docs, and an example viewer are included.
 
 ## Install
 
@@ -23,6 +23,12 @@ For keyboard helpers based on crossterm:
 
 ```toml
 ratatui-3dmesh = { version = "0.1", features = ["cli-example"] }
+```
+
+For PNG/JPEG texture images:
+
+```toml
+ratatui-3dmesh = { version = "0.1", features = ["textures"] }
 ```
 
 ## Use as a Ratatui widget
@@ -46,12 +52,48 @@ frame.render_stateful_widget(
 # }
 ```
 
+## Textured OBJ usage
+
+Texture rendering requires OBJ UV coordinates (`vt`) and face UV references such as `f 1/1/1 2/2/2 3/3/3`.
+
+MTL-driven texture:
+
+```text
+model.obj  -> mtllib model.mtl
+model.mtl  -> map_Kd texture.png
+```
+
+Manual texture override for models that have UVs but no usable MTL:
+
+```rust,no_run
+use ratatui_3dmesh::{Mesh, MeshLoadOptions};
+
+# fn load() -> ratatui_3dmesh::Result<Mesh> {
+let mesh = Mesh::load_with_options(
+    "models/model.obj",
+    MeshLoadOptions::default()
+        .load_material_textures(true)
+        .texture_override("models/AXEE_LP_exported_Base_color.jpg"),
+)?;
+# Ok(mesh)
+# }
+```
+
+The texture loader sniffs image bytes instead of trusting the extension, so a PNG file named `.jpg` can still decode.
+
 ## Run the example viewer
 
 ```bash
 cargo run --example viewer --features cli-example
 cargo run --example viewer --features cli-example -- examples/assets/pyramid.obj
 cargo run --example viewer --features cli-example -- examples/assets/tetra.stl
+```
+
+Run with texture support:
+
+```bash
+cargo run --release --example viewer --features "cli-example textures" -- \
+  models/model.obj --texture models/AXEE_LP_exported_Base_color.jpg
 ```
 
 Controls:
@@ -63,7 +105,7 @@ Controls:
 | `hjkl` | pan |
 | `+` / `-` | zoom |
 | `m` | cycle solid/wireframe/points |
-| `c` | cycle material/lighting/off color |
+| `c` | cycle material/lighting/texture/auto/off color |
 | `space` | toggle auto-spin |
 | `r` | reset view |
 | `?` | help overlay |
@@ -73,11 +115,12 @@ Controls:
 
 | Format | Support |
 | --- | --- |
-| OBJ | vertices, polygon faces, negative indices, `usemtl`, companion `mtllib` |
-| MTL | `newmtl` and diffuse `Kd` colors |
+| OBJ | vertices, texture coordinates, normals, polygon faces, negative indices, `usemtl`, companion `mtllib` |
+| MTL | `newmtl`, diffuse `Kd` colors, diffuse `map_Kd` texture paths |
+| Textures | optional PNG/JPEG decode to RGBA8 via the `textures` feature; manual `--texture` override supported |
 | STL | ASCII STL and binary STL |
 
-Textures, animation, and scene graphs are intentionally out of scope for the initial release.
+STL files and OBJ files without UVs continue to render with material/lighting/grayscale modes.
 
 ## Configuration highlights
 
@@ -86,7 +129,9 @@ Textures, animation, and scene graphs are intentionally out of scope for the ini
 - `glyph_ramp(...)` — dark-to-light ASCII ramp.
 - `render_mode(RenderMode::{Solid, Wireframe, Points})`.
 - `projection(ProjectionMode::{Perspective, Orthographic})`.
-- `color_mode(ColorMode::{Material, Lighting, Off})`.
+- `color_mode(ColorMode::{Material, Lighting, Texture, Auto, Off})`.
+- `texture_filter(TextureFilter::{Nearest, Bilinear})`, `texture_wrap(TextureWrap::{Repeat, Clamp})`.
+- `flip_texture_v(...)`, `texture_lighting(...)`.
 - `scale(...)`, `fov_y_degrees(...)`, `cell_aspect_ratio(...)`.
 - `backface_culling(...)`, `light_direction(...)`, `lighting(...)`.
 - `auto_spin([x, y, z])`, `max_faces(...)`.
@@ -105,8 +150,9 @@ let pretty = Mesh3dConfig::quality();
 | --- | --- | --- |
 | `obj` | yes | Wavefront OBJ loading |
 | `stl` | yes | ASCII/binary STL loading |
-| `mtl` | yes | OBJ material diffuse-color loading |
-| `serde` | no | serialize/deserialize public config/model/state types |
+| `mtl` | yes | OBJ material diffuse-color and `map_Kd` metadata loading |
+| `textures` | no | PNG/JPEG texture image decoding and texture-colored rendering |
+| `serde` | no | serialize/deserialize public config/model/state types where practical |
 | `cli-example` | no | crossterm keyboard control helpers and example support |
 
 ## Public docs / GitHub Wiki
@@ -127,6 +173,7 @@ cargo doc --all-features --no-deps
 - ASCII/luminance 3D viewer inspiration: [`autopawn/3d-ascii-viewer`](https://github.com/autopawn/3d-ascii-viewer).
 - Rust terminal 3D viewer reference: [`luisbedoia/sx3d`](https://github.com/luisbedoia/sx3d).
 - UI framework: [Ratatui](https://ratatui.rs/).
+- Image decoding: [`image`](https://crates.io/crates/image) when the `textures` feature is enabled.
 - Included example pyramid/tetrahedron assets are simple generated fixtures released under this repository's MIT license.
 
 ## License

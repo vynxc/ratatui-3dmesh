@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::{path::Path, sync::Arc};
 
 use ratatui::style::Color;
 
@@ -107,6 +107,24 @@ impl std::ops::Div<f32> for Vec3 {
     }
 }
 
+/// A small 2D vector type used for texture coordinates.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct Vec2 {
+    /// Horizontal texture coordinate.
+    pub u: f32,
+    /// Vertical texture coordinate.
+    pub v: f32,
+}
+
+impl Vec2 {
+    /// Create a texture coordinate.
+    #[must_use]
+    pub const fn new(u: f32, v: f32) -> Self {
+        Self { u, v }
+    }
+}
+
 /// Axis-aligned mesh bounds.
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -157,6 +175,93 @@ impl Bounds {
     }
 }
 
+/// Reference to a texture image on disk or inside a loaded mesh.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct TextureRef {
+    /// Source path as resolved by the loader.
+    pub path: std::path::PathBuf,
+    /// Loaded texture index inside [`Mesh::textures`], when available.
+    pub index: Option<usize>,
+}
+
+impl TextureRef {
+    /// Create a texture reference with no loaded index.
+    #[must_use]
+    pub fn new(path: impl Into<std::path::PathBuf>) -> Self {
+        Self {
+            path: path.into(),
+            index: None,
+        }
+    }
+}
+
+/// Loaded RGBA texture image.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Texture {
+    /// Source path.
+    pub path: std::path::PathBuf,
+    /// Image width in pixels.
+    pub width: u32,
+    /// Image height in pixels.
+    pub height: u32,
+    /// Packed RGBA8 pixels in row-major order.
+    pub rgba: Arc<[u8]>,
+}
+
+impl Texture {
+    /// Create a loaded texture from RGBA8 pixels.
+    #[must_use]
+    pub fn new(
+        path: impl Into<std::path::PathBuf>,
+        width: u32,
+        height: u32,
+        rgba: Vec<u8>,
+    ) -> Self {
+        Self {
+            path: path.into(),
+            width,
+            height,
+            rgba: Arc::from(rgba),
+        }
+    }
+
+    /// Sample the texture using normalized UV coordinates.
+    #[must_use]
+    pub fn sample_nearest(
+        &self,
+        uv: Vec2,
+        wrap: crate::config::TextureWrap,
+        flip_v: bool,
+    ) -> [u8; 4] {
+        if self.width == 0 || self.height == 0 || self.rgba.len() < 4 {
+            return [255, 255, 255, 255];
+        }
+        let mut u = match wrap {
+            crate::config::TextureWrap::Repeat => uv.u.rem_euclid(1.0),
+            crate::config::TextureWrap::Clamp => uv.u.clamp(0.0, 1.0),
+        };
+        let mut v = match wrap {
+            crate::config::TextureWrap::Repeat => uv.v.rem_euclid(1.0),
+            crate::config::TextureWrap::Clamp => uv.v.clamp(0.0, 1.0),
+        };
+        if flip_v {
+            v = 1.0 - v;
+        }
+        // Keep exact 1.0 on the last pixel for clamp mode.
+        if matches!(wrap, crate::config::TextureWrap::Repeat) {
+            u = u.fract();
+            v = v.fract();
+        }
+        let x = (u * (self.width.saturating_sub(1)) as f32).round() as u32;
+        let y = (v * (self.height.saturating_sub(1)) as f32).round() as u32;
+        let idx = ((y as usize * self.width as usize) + x as usize) * 4;
+        self.rgba
+            .get(idx..idx + 4)
+            .map_or([255, 255, 255, 255], |p| [p[0], p[1], p[2], p[3]])
+    }
+}
+
 /// Diffuse material metadata.
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -165,9 +270,21 @@ pub struct Material {
     pub name: String,
     /// Diffuse color as normalized RGB.
     pub diffuse: [f32; 3],
+    /// Optional diffuse texture map (`map_Kd`).
+    pub diffuse_texture: Option<TextureRef>,
 }
 
 impl Material {
+    /// Create a material with a white diffuse color.
+    #[must_use]
+    pub fn new(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            diffuse: [1.0, 1.0, 1.0],
+            diffuse_texture: None,
+        }
+    }
+
     /// Convert diffuse color to Ratatui RGB.
     #[must_use]
     pub fn color(&self) -> Color {
@@ -186,6 +303,10 @@ impl Material {
 pub struct Face {
     /// Triangle or polygon indices. The renderer triangulates fans at draw time.
     pub indices: Vec<usize>,
+    /// Optional texture-coordinate indices aligned with [`Self::indices`].
+    pub tex_coord_indices: Vec<Option<usize>>,
+    /// Optional normal indices aligned with [`Self::indices`].
+    pub normal_indices: Vec<Option<usize>>,
     /// Optional source/material name.
     pub material: Option<String>,
     /// Optional face normal from file, otherwise computed from vertices.
@@ -193,11 +314,30 @@ pub struct Face {
 }
 
 impl Face {
-    /// Create a face from indices.
+    /// Create a face from vertex indices.
     #[must_use]
     pub fn new(indices: Vec<usize>) -> Self {
+        let len = indices.len();
         Self {
             indices,
+            tex_coord_indices: vec![None; len],
+            normal_indices: vec![None; len],
+            material: None,
+            normal: None,
+        }
+    }
+
+    /// Create a face with explicit texture-coordinate and normal indices.
+    #[must_use]
+    pub fn with_attributes(
+        indices: Vec<usize>,
+        tex_coord_indices: Vec<Option<usize>>,
+        normal_indices: Vec<Option<usize>>,
+    ) -> Self {
+        Self {
+            indices,
+            tex_coord_indices,
+            normal_indices,
             material: None,
             normal: None,
         }
@@ -212,10 +352,19 @@ pub struct Mesh {
     pub name: String,
     /// Vertex positions.
     pub vertices: Vec<Vec3>,
+    /// Texture coordinates.
+    pub tex_coords: Vec<Vec2>,
+    /// Vertex normals from OBJ files.
+    pub normals: Vec<Vec3>,
     /// Faces/polygons.
     pub faces: Vec<Face>,
     /// Materials referenced by faces.
     pub materials: Vec<Material>,
+    /// Loaded textures referenced by materials or manual overrides.
+    #[cfg_attr(feature = "serde", serde(skip))]
+    pub textures: Vec<Texture>,
+    /// Texture used when a face has UVs but no material texture.
+    pub default_texture: Option<TextureRef>,
     /// Cached bounds.
     pub bounds: Bounds,
 }
@@ -228,6 +377,18 @@ impl Mesh {
         faces: Vec<Face>,
         materials: Vec<Material>,
     ) -> Result<Self> {
+        Self::with_attributes(name, vertices, Vec::new(), Vec::new(), faces, materials)
+    }
+
+    /// Build a mesh with OBJ attributes and compute bounds.
+    pub fn with_attributes(
+        name: impl Into<String>,
+        vertices: Vec<Vec3>,
+        tex_coords: Vec<Vec2>,
+        normals: Vec<Vec3>,
+        faces: Vec<Face>,
+        materials: Vec<Material>,
+    ) -> Result<Self> {
         if vertices.is_empty() || faces.is_empty() {
             return Err(Error::EmptyMesh);
         }
@@ -235,8 +396,12 @@ impl Mesh {
         Ok(Self {
             name: name.into(),
             vertices,
+            tex_coords,
+            normals,
             faces,
             materials,
+            textures: Vec::new(),
+            default_texture: None,
             bounds,
         })
     }
@@ -244,6 +409,23 @@ impl Mesh {
     /// Load a mesh from `.obj` or `.stl`, using enabled format features.
     pub fn load(path: impl AsRef<Path>) -> Result<Self> {
         loader::load(path.as_ref())
+    }
+
+    /// Load a mesh with extra loader options such as texture override.
+    pub fn load_with_options(
+        path: impl AsRef<Path>,
+        options: loader::MeshLoadOptions,
+    ) -> Result<Self> {
+        loader::load_with_options(path.as_ref(), &options)
+    }
+
+    /// Load a mesh and attach a texture for OBJ files with UVs but no MTL.
+    #[cfg(feature = "textures")]
+    pub fn load_textured(path: impl AsRef<Path>, texture_path: impl AsRef<Path>) -> Result<Self> {
+        Self::load_with_options(
+            path,
+            loader::MeshLoadOptions::default().texture_override(texture_path.as_ref()),
+        )
     }
 
     /// Find a material by name.
@@ -266,8 +448,12 @@ impl Mesh {
         Self {
             name: self.name.clone(),
             vertices,
+            tex_coords: self.tex_coords.clone(),
+            normals: self.normals.clone(),
             faces: self.faces.clone(),
             materials: self.materials.clone(),
+            textures: self.textures.clone(),
+            default_texture: self.default_texture.clone(),
             bounds,
         }
     }
