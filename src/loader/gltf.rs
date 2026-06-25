@@ -786,64 +786,21 @@ mod tests {
         assert_eq!(point, Vec3::new(3.0, 5.0, 7.0));
     }
 
-    #[test]
-    fn loads_axe_fixture_when_present() {
-        let path = Path::new("models/axe/scene.gltf");
-        if !path.exists() {
-            return;
-        }
-        // glTF images are embedded; default options must load textures without opting in.
-        let mesh = load_gltf(path, &MeshLoadOptions::default()).unwrap();
-        assert!(!mesh.vertices.is_empty());
-        assert!(!mesh.faces.is_empty());
-        assert!(!mesh.tex_coords.is_empty());
-        #[cfg(feature = "textures")]
-        assert!(!mesh.textures.is_empty());
-    }
-
     #[cfg(feature = "textures")]
     #[test]
-    fn imports_shantae_material_semantics_when_present() {
-        let path = Path::new("models/shantae/scene.gltf");
-        if !path.exists() {
-            return;
-        }
+    fn loads_embedded_glb_textures_without_opt_in() {
+        // glTF/GLB embeds its images; default options must decode them without the
+        // caller opting into material textures the way OBJ requires.
+        let path = Path::new("examples/assets/gltf/box_textured.glb");
         let mesh = load_gltf(path, &MeshLoadOptions::default()).unwrap();
 
-        // Textures load by default for glTF.
-        assert!(!mesh.textures.is_empty(), "embedded images must load");
+        assert!(!mesh.vertices.is_empty());
+        assert!(!mesh.faces.is_empty());
+        assert!(!mesh.tex_coords.is_empty(), "textured box carries UVs");
+        assert!(!mesh.textures.is_empty(), "embedded image must decode");
 
-        let material = |name: &str| mesh.materials.iter().find(|m| m.name == name).unwrap();
-
-        // Hair is double-sided: previously its back-facing cards were culled and vanished.
-        let hair = material("MAT_HAIR");
-        assert!(hair.double_sided, "hair must be double-sided");
-        assert!(
-            hair.diffuse_texture
-                .as_ref()
-                .and_then(|t| t.index)
-                .is_some(),
-            "hair base-color texture must resolve to a loaded index"
-        );
-
-        // Eyes are BLEND + double-sided + emissive: they were flattening to white.
-        for eye in ["MAT_EYE_R", "MAT_EYE_L"] {
-            let m = material(eye);
-            assert_eq!(m.alpha_mode, AlphaMode::Blend, "{eye} should be BLEND");
-            assert!(m.double_sided, "{eye} should be double-sided");
-            assert!(m.is_emissive(), "{eye} should carry emissive detail");
-            assert!(
-                m.emissive_texture.as_ref().and_then(|t| t.index).is_some(),
-                "{eye} emissive texture must resolve"
-            );
-        }
-
-        // Transparent clothing carries a sub-1.0 base-color alpha.
-        let pant = material("MAT_TRANSP_PANT_L");
-        assert_eq!(pant.alpha_mode, AlphaMode::Blend);
-        assert!(pant.base_color_alpha < 1.0);
-
-        // Every material with a base-color texture resolves to a valid loaded texture.
+        // Every base-color texture reference must resolve to a loaded texture index.
+        let mut resolved = 0usize;
         for material in &mesh.materials {
             if let Some(index) = material.diffuse_texture.as_ref().and_then(|t| t.index) {
                 assert!(
@@ -851,23 +808,50 @@ mod tests {
                     "material {} references missing texture {index}",
                     material.name
                 );
+                resolved += 1;
             }
         }
+        assert!(resolved > 0, "textured box must resolve a base-color map");
     }
 
     #[test]
-    fn loads_shantae_skin_animation_when_present() {
-        let path = Path::new("models/shantae/scene.gltf");
-        if !path.exists() {
-            return;
-        }
+    fn loads_glb_node_animation() {
+        // BoxAnimated exercises node TRS animation without skinning.
+        let path = Path::new("examples/assets/gltf/box_animated.glb");
         let mesh = load_gltf(path, &MeshLoadOptions::default()).unwrap();
-        assert!(!mesh.animations.is_empty());
-        assert!(!mesh.skins.is_empty());
 
-        let sampled = sample_mesh_animation(&mesh, 0, 0.1, true).unwrap();
+        assert!(!mesh.vertices.is_empty());
+        assert!(!mesh.animations.is_empty(), "must import animation clips");
+        assert!(
+            mesh.animations[0].channel_count() > 0,
+            "clip must carry channels"
+        );
+
+        let sampled = sample_mesh_animation(&mesh, 0, 0.5, true).unwrap();
         assert_eq!(sampled.vertices.len(), mesh.vertices.len());
-        assert_ne!(sampled.vertices, mesh.vertices);
+    }
+
+    #[test]
+    fn loads_glb_skinned_animation() {
+        // Fox is a skinned mesh with multiple clips: it exercises JOINTS_0/WEIGHTS_0
+        // CPU skinning end to end.
+        let path = Path::new("examples/assets/gltf/fox.glb");
+        let mesh = load_gltf(path, &MeshLoadOptions::default()).unwrap();
+
+        assert!(!mesh.skins.is_empty(), "fox must load skin bindings");
+        assert!(
+            mesh.animations.len() >= 2,
+            "fox ships several animation clips, got {}",
+            mesh.animations.len()
+        );
+
+        // Skinning at a non-zero time must actually displace vertices from bind pose.
+        let sampled = sample_mesh_animation(&mesh, 0, 0.3, true).unwrap();
+        assert_eq!(sampled.vertices.len(), mesh.vertices.len());
+        assert_ne!(
+            sampled.vertices, mesh.vertices,
+            "skinned pose must differ from bind pose"
+        );
     }
 
     #[test]

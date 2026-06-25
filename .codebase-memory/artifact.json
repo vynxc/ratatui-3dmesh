@@ -1,11 +1,11 @@
 {
     "schema_version": 1,
-    "commit": "9b73a7be104a5a61db7a8e0d1432b1699302acbd",
-    "indexed_at": "2026-06-24T22:15:53Z",
+    "commit": "a5220e91e40c47285496977785bb893ccf315d7b",
+    "indexed_at": "2026-06-25T22:36:11Z",
     "project": "home-vynxc-code-ratatui-3dmesh",
-    "nodes": 604,
-    "edges": 2117,
-    "original_size": 3866624,
-    "compressed_size": 619480,
+    "nodes": 647,
+    "edges": 2340,
+    "original_size": 4063232,
+    "compressed_size": 623196,
     "compression_level": 3
 }

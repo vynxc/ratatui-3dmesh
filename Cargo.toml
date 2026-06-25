@@ -2,13 +2,23 @@
 name = "ratatui-3dmesh"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.74"
+rust-version = "1.88"
 description = "A reusable Ratatui widget for rendering OBJ/glTF/GLB 3D meshes as shaded terminal ASCII."
 license = "MIT"
 readme = "README.md"
-repository = "https://github.com/your-org/ratatui-3dmesh"
+repository = "https://github.com/vynxc/ratatui-3dmesh"
+homepage = "https://github.com/vynxc/ratatui-3dmesh"
 keywords = ["ratatui", "tui", "3d", "ascii", "widget"]
 categories = ["command-line-interface", "rendering", "visualization"]
+
+# Keep the published crate lean and reproducible: local-only model dumps, planning
+# notes, and the code-memory index are never part of a release.
+exclude = [
+    "models/",
+    ".mimir/",
+    ".codebase-memory/",
+    ".github/",
+]
 
 [features]
 default = ["obj", "mtl", "gltf", "textures"]

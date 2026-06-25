@@ -2,6 +2,15 @@
 
 ## Add the crate
 
+Until the crate is published to crates.io, depend on it from GitHub:
+
+```toml
+[dependencies]
+ratatui-3dmesh = { git = "https://github.com/vynxc/ratatui-3dmesh" }
+```
+
+After it is published, the version form works:
+
 ```toml
 [dependencies]
 ratatui-3dmesh = "0.1"
@@ -10,42 +19,34 @@ ratatui-3dmesh = "0.1"
 Enable keyboard helpers for crossterm apps:
 
 ```toml
-ratatui-3dmesh = { version = "0.1", features = ["cli-example"] }
+ratatui-3dmesh = { git = "https://github.com/vynxc/ratatui-3dmesh", features = ["cli-example"] }
 ```
 
-Enable texture images:
-
-```toml
-ratatui-3dmesh = { version = "0.1", features = ["textures"] }
-```
-
-
-Enable glTF/GLB loading:
-
-```toml
-ratatui-3dmesh = { version = "0.1", features = ["gltf"] }
-```
+The default features already include `gltf` and `textures`; disable defaults to trim
+the build down to a single format.
 
 ## Run the bundled viewer
+
+The repository ships small, redistributable sample assets so the viewer works on a
+fresh clone:
 
 ```bash
 cargo run --example viewer --features cli-example
 cargo run --example viewer --features cli-example -- examples/assets/pyramid.obj
 ```
 
-Run a textured OBJ in release mode:
-
-```bash
-cargo run --release --example viewer --features "cli-example textures" -- \
-  models/model.obj --texture models/AXEE_LP_exported_Base_color.jpg
-```
-
-
-Run the axe glTF asset in release mode:
+Run a glTF asset in release mode:
 
 ```bash
 cargo run --release --example viewer --features "cli-example gltf textures" -- \
-  models/axe/scene.gltf
+  examples/assets/gltf/fox.glb
+```
+
+Point it at your own textured OBJ that has UVs but no usable MTL:
+
+```bash
+cargo run --release --example viewer --features "cli-example textures" -- \
+  your-model.obj --texture your-basecolor.png
 ```
 
 The `--texture` flag is useful when an OBJ has UVs but no usable MTL file. OBJ + MTL + `map_Kd` textures can load without `--texture` when `load_material_textures` is enabled by the example.
