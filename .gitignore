@@ -3,6 +3,6 @@ Cargo.lock
 *.swp
 *.swo
 .DS_Store
-models
-.codebase-memory
-.mimir
+models/
+.codebase-memory/
+.mimir/
