@@ -40,6 +40,12 @@ find "$work_dir" -mindepth 1 -maxdepth 1 \
   -exec rm -rf {} +
 
 cp "$source_dir"/*.md "$work_dir"/
+if [[ -d "$source_dir/images" ]]; then
+  cp -R "$source_dir/images" "$work_dir"/
+fi
+if [[ -d "$source_dir/media" ]]; then
+  cp -R "$source_dir/media" "$work_dir"/
+fi
 
 if git -C "$work_dir" diff --quiet -- .; then
   echo "wiki is already up to date"

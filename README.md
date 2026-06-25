@@ -5,6 +5,10 @@
 
 A reusable [Ratatui](https://ratatui.rs/) widget for viewing 3D meshes as shaded terminal ASCII with optional truecolor texture output.
 
+![ratatui-3dmesh rendering a textured fox glTF model in a terminal](docs/wiki/images/ratatui-3dmesh-viewer-fox.png)
+
+[Watch the viewer demo](docs/wiki/media/ratatui-3dmesh-viewer-fox.webm)
+
 `ratatui-3dmesh` is inspired by:
 
 - [`autopawn/3d-ascii-viewer`](https://github.com/autopawn/3d-ascii-viewer) — C/ncurses OBJ ASCII rendering with optional MTL diffuse colors.
@@ -55,6 +59,17 @@ ratatui-3dmesh = { version = "0.1", default-features = false, features = ["gltf"
 ```
 
 ## Use as a Ratatui widget
+
+```mermaid
+flowchart LR
+    app["Ratatui app"] --> load["Mesh::load"]
+    load --> mesh["Mesh\nvertices, faces, materials,\ntextures, animations"]
+    mesh --> widget["Mesh3dWidget"]
+    state["Mesh3dState\nrotation, pan, zoom,\nplayback"] --> widget
+    config["Mesh3dConfig\nprojection, lighting,\ncolor mode"] --> widget
+    widget --> frame["frame.render_stateful_widget"]
+    frame --> terminal["terminal ASCII\nand truecolor cells"]
+```
 
 ```rust,no_run
 use ratatui_3dmesh::{Mesh, Mesh3dConfig, Mesh3dState, Mesh3dWidget};

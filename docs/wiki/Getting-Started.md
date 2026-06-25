@@ -1,5 +1,16 @@
 # Getting Started
 
+```mermaid
+flowchart LR
+    model["OBJ / glTF / GLB"] --> load["Mesh::load_with_options"]
+    load --> mesh["Mesh"]
+    mesh --> widget["Mesh3dWidget"]
+    state["Mesh3dState"] --> widget
+    config["Mesh3dConfig"] --> widget
+    widget --> ratatui["Ratatui frame"]
+    ratatui --> terminal["Terminal output"]
+```
+
 ## Add the crate
 
 Until the crate is published to crates.io, depend on it from GitHub:

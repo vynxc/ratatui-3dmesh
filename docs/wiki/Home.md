@@ -2,6 +2,10 @@
 
 `ratatui-3dmesh` is an embeddable Ratatui widget for rendering 3D OBJ and glTF/GLB meshes as terminal ASCII.
 
+![ratatui-3dmesh rendering a textured fox glTF model in a terminal](images/ratatui-3dmesh-viewer-fox.png)
+
+[Watch the viewer demo](media/ratatui-3dmesh-viewer-fox.webm)
+
 ## Quick links
 
 - [Getting Started](Getting-Started.md)
