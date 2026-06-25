@@ -47,20 +47,21 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        features:
-          - "--no-default-features --features obj,mtl"
-          - "--no-default-features --features gltf,textures"
-          - "--no-default-features --features serde"
-          - "--features cli-example"
+        include:
+          - features: "--no-default-features --features obj,mtl"
+            key: "obj-mtl"
+          - features: "--no-default-features --features gltf,textures"
+            key: "gltf-textures"
+          - features: "--no-default-features --features serde"
+            key: "serde"
+          - features: "--features cli-example"
+            key: "cli-example"
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
-          # Each matrix leg builds a different feature set; give them separate cache
-          # keys so they don't thrash one shared cache (and so parallel runs don't
-          # collide).
-          key: ${{ matrix.features }}
+          key: ${{ matrix.key }}
       - run: cargo test ${{ matrix.features }}
 
   docs:
