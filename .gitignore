@@ -6,3 +6,4 @@ Cargo.lock
 models/
 .codebase-memory/
 .mimir/
+.wiki/
