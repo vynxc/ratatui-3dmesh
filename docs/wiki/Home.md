@@ -4,7 +4,7 @@
 
 ![ratatui-3dmesh rendering a textured fox glTF model in a terminal](images/ratatui-3dmesh-viewer-fox.png)
 
-[Watch the viewer demo](media/ratatui-3dmesh-viewer-fox.webm)
+![Animated demo of ratatui-3dmesh rotating a textured fox glTF model](images/ratatui-3dmesh-viewer-fox.gif)
 
 ## Quick links
 

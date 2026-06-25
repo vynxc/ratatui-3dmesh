@@ -7,7 +7,7 @@ A reusable [Ratatui](https://ratatui.rs/) widget for viewing 3D meshes as shaded
 
 ![ratatui-3dmesh rendering a textured fox glTF model in a terminal](docs/wiki/images/ratatui-3dmesh-viewer-fox.png)
 
-[Watch the viewer demo](docs/wiki/media/ratatui-3dmesh-viewer-fox.webm)
+![Animated demo of ratatui-3dmesh rotating a textured fox glTF model](docs/wiki/images/ratatui-3dmesh-viewer-fox.gif)
 
 `ratatui-3dmesh` is inspired by:
 
