@@ -305,7 +305,8 @@ fn shade_cell(
     // lighting and show their flat base color, so drive shading at full
     // intensity. Lighting-only mode discards material color by design, so it is
     // left untouched.
-    let unlit = material.is_some_and(|m| m.unlit) && !matches!(config.color_mode, ColorMode::Lighting);
+    let unlit =
+        material.is_some_and(|m| m.unlit) && !matches!(config.color_mode, ColorMode::Lighting);
     let shade_intensity = if unlit { 1.0 } else { shading.intensity };
     let lit = diffuse_sample.map_or_else(
         || lit_solid_rgb(material, shade_intensity, config),

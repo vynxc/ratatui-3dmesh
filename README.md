@@ -1,5 +1,8 @@
 # ratatui-3dmesh
 
+[![CI](https://github.com/vynxc/ratatui-3dmesh/actions/workflows/ci.yml/badge.svg)](https://github.com/vynxc/ratatui-3dmesh/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 A reusable [Ratatui](https://ratatui.rs/) widget for viewing 3D meshes as shaded terminal ASCII with optional truecolor texture output.
 
 `ratatui-3dmesh` is inspired by:
@@ -12,6 +15,22 @@ This crate is built for embedding. Your app owns terminal initialization, layout
 > Status: early public crate. Supports OBJ (with companion MTL) and glTF/GLB, glTF node animation playback and CPU skinning, material-aware rendering (double-sided, alpha mask/blend, emissive), UV parsing, texture images, solid/wire/point modes, color policies, controls, docs, and an example viewer.
 
 ## Install
+
+Until the crate is published to crates.io, depend on it straight from GitHub:
+
+```toml
+[dependencies]
+ratatui-3dmesh = { git = "https://github.com/vynxc/ratatui-3dmesh" }
+ratatui = "0.29"
+```
+
+Pin to a tag or commit for reproducible builds:
+
+```toml
+ratatui-3dmesh = { git = "https://github.com/vynxc/ratatui-3dmesh", tag = "v0.1.0" }
+```
+
+Once it lands on crates.io, the version form works too:
 
 ```toml
 [dependencies]
@@ -74,10 +93,10 @@ use ratatui_3dmesh::{Mesh, MeshLoadOptions};
 
 # fn load() -> ratatui_3dmesh::Result<Mesh> {
 let mesh = Mesh::load_with_options(
-    "models/model.obj",
+    "your-model.obj",
     MeshLoadOptions::default()
         .load_material_textures(true)
-        .texture_override("models/AXEE_LP_exported_Base_color.jpg"),
+        .texture_override("your-basecolor.png"),
 )?;
 # Ok(mesh)
 # }
@@ -100,18 +119,18 @@ The renderer is material-aware, so authored details survive into the terminal:
 use ratatui_3dmesh::Mesh;
 
 # fn load() -> ratatui_3dmesh::Result<Mesh> {
-let mesh = Mesh::load("models/shantae/scene.gltf")?;
+let mesh = Mesh::load("examples/assets/gltf/fox.glb")?;
 # Ok(mesh)
 # }
 ```
 
 Embedded glTF/GLB animations are imported as `mesh.animations`. This pass supports node translation, rotation, and scale channels with linear or step interpolation, including CPU skinning for glTF meshes with `JOINTS_0`/`WEIGHTS_0`. Morph-target weights and cubic-spline interpolation are left as follow-up scope.
 
-Run the axe asset:
+Run a bundled asset:
 
 ```bash
 cargo run --release --example viewer --features cli-example -- \
-  models/axe/scene.gltf
+  examples/assets/gltf/fox.glb
 ```
 
 ### glTF compatibility sweep
@@ -128,17 +147,21 @@ The test loads every `.gltf`/`.glb` under `GLTF_CORPUS_DIR` and fails on any tha
 
 ## Run the example viewer
 
+The repository ships small, redistributable sample assets under
+[`examples/assets`](examples/assets) so the viewer works on a fresh clone:
+
 ```bash
 cargo run --example viewer --features cli-example
 cargo run --example viewer --features cli-example -- examples/assets/pyramid.obj
-cargo run --release --example viewer --features cli-example -- models/shantae/scene.gltf
+cargo run --release --example viewer --features cli-example -- examples/assets/gltf/box_textured.glb
+cargo run --release --example viewer --features cli-example -- examples/assets/gltf/fox.glb
 ```
 
 Manual texture override (OBJ with UVs but no usable MTL):
 
 ```bash
 cargo run --release --example viewer --features cli-example -- \
-  models/model.obj --texture models/AXEE_LP_exported_Base_color.jpg
+  your-model.obj --texture your-basecolor.png
 ```
 
 Controls:
@@ -220,6 +243,10 @@ cargo clippy --all-targets --all-features -- -D warnings
 cargo doc --all-features --no-deps
 ```
 
+Continuous integration runs all of the above plus a feature matrix and an MSRV
+(`1.88`) check on every push and pull request. See
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml).
+
 ## Credits
 
 - ASCII/luminance 3D viewer inspiration: [`autopawn/3d-ascii-viewer`](https://github.com/autopawn/3d-ascii-viewer).
@@ -227,6 +254,10 @@ cargo doc --all-features --no-deps
 - UI framework: [Ratatui](https://ratatui.rs/).
 - Image decoding: [`image`](https://crates.io/crates/image) when the `textures` feature is enabled.
 - Included example pyramid/tetrahedron assets are simple generated fixtures released under this repository's MIT license.
+- Bundled glTF sample models in [`examples/assets/gltf`](examples/assets/gltf) come from the
+  [Khronos glTF Sample Assets](https://github.com/KhronosGroup/glTF-Sample-Assets) under
+  CC0/CC-BY 4.0; see [`examples/assets/gltf/LICENSE.md`](examples/assets/gltf/LICENSE.md)
+  for per-model attribution.
 
 ## License
 

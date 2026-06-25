@@ -48,7 +48,7 @@ Example:
 
 ```bash
 cargo run --release --example viewer --features "cli-example textures" -- \
-  models/model.obj --texture models/AXEE_LP_exported_Base_color.jpg
+  your-model.obj --texture your-basecolor.png
 ```
 
 ## glTF / GLB
@@ -75,7 +75,7 @@ Example:
 
 ```bash
 cargo run --release --example viewer --features cli-example -- \
-  models/shantae/scene.gltf
+  examples/assets/gltf/fox.glb
 ```
 
 To sweep a broad corpus of real-world models, see `scripts/fetch-gltf-corpus.sh` and the
