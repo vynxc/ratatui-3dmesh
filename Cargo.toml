@@ -24,8 +24,8 @@ exclude = [
 default = ["obj", "mtl", "gltf", "textures"]
 obj = []
 mtl = []
-gltf = ["dep:gltf"]
-textures = ["dep:image"]
+gltf = ["dep:gltf", "dep:urlencoding"]
+textures = ["dep:base64", "dep:image"]
 serde = ["dep:serde"]
 cli-example = ["dep:crossterm"]
 
@@ -33,8 +33,10 @@ cli-example = ["dep:crossterm"]
 ratatui = { version = "0.29", default-features = false, features = ["serde"] }
 thiserror = "2"
 serde = { version = "1", features = ["derive"], optional = true }
-image = { version = "0.25", default-features = false, features = ["png", "jpeg"], optional = true }
-gltf = { version = "1", optional = true, features = [
+base64 = { version = "0.22", optional = true }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"], optional = true }
+urlencoding = { version = "2", optional = true }
+gltf = { version = "1.4.1", optional = true, features = [
     # Pure-JSON Khronos extensions: enabling these costs no extra binary size
     # (no decoder crates) but lets the importer accept any model that lists one
     # as `extensionsRequired`, instead of hard-failing validation. Geometry
@@ -51,6 +53,8 @@ gltf = { version = "1", optional = true, features = [
     "KHR_materials_variants",
     "KHR_materials_volume",
     "KHR_texture_transform",
+    "allow_empty_texture",
+    "extensions",
 ] }
 
 crossterm = { version = "0.28", optional = true }

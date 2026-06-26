@@ -13,7 +13,7 @@ use crate::{
 };
 
 #[cfg(feature = "textures")]
-use crate::model::Texture;
+use crate::{loader::texture::decode_texture, model::Texture};
 
 /// Load a glTF/GLB mesh.
 ///
@@ -22,23 +22,23 @@ use crate::model::Texture;
 /// Returns an error when the glTF document cannot be imported, decoded texture data uses an
 /// unsupported format, or the resulting mesh geometry is invalid.
 pub fn load_gltf(path: &Path, options: &MeshLoadOptions) -> Result<Mesh> {
-    let (document, buffers, images) = gltf::import(path).map_err(|err| {
-        Error::parse(
-            path,
-            None,
-            format!("failed to import glTF document and buffers: {err}"),
-        )
+    let gltf = gltf::Gltf::open(path).map_err(|err| {
+        Error::parse(path, None, format!("failed to import glTF document: {err}"))
     })?;
+    let base = path.parent().unwrap_or_else(|| Path::new("./"));
+    let buffers = gltf::import_buffers(&gltf.document, Some(base), gltf.blob)
+        .map_err(|err| Error::parse(path, None, format!("failed to import glTF buffers: {err}")))?;
+    let document = gltf.document;
 
     let mut materials = collect_materials(path, &document);
     let geometry = collect_geometry(&document, &buffers, &materials);
     let animations = collect_animations(&document, &buffers);
 
     #[cfg(feature = "textures")]
-    let textures = load_textures(path, options, &images)?;
+    let textures = load_textures(path, options, &document, &buffers)?;
 
     #[cfg(not(feature = "textures"))]
-    let _ = (images, options);
+    let _ = options;
 
     if materials.is_empty() {
         materials.push(Material::new("default"));
@@ -115,11 +115,9 @@ fn collect_materials(path: &Path, document: &gltf::Document) -> Vec<Material> {
             // KHR_materials_unlit: render the base color flat, ignoring lighting.
             output.unlit = material.unlit();
             if let Some(info) = pbr.base_color_texture() {
-                let source = info.texture().source();
-                output.diffuse_texture = Some(TextureRef {
-                    path: image_path(path, source.index(), image_uri(source.source())),
-                    index: Some(source.index()),
-                });
+                if let Some(source) = texture_image(document, &info.texture()) {
+                    output.diffuse_texture = Some(texture_ref(path, source));
+                }
             }
             // Some assets use the deprecated KHR_materials_pbrSpecularGlossiness
             // extension, which carries the diffuse color/texture instead of the
@@ -130,19 +128,15 @@ fn collect_materials(path: &Path, document: &gltf::Document) -> Vec<Material> {
                 output.diffuse = [red, green, blue];
                 output.base_color_alpha = alpha;
                 if let Some(info) = sg.diffuse_texture() {
-                    let source = info.texture().source();
-                    output.diffuse_texture = Some(TextureRef {
-                        path: image_path(path, source.index(), image_uri(source.source())),
-                        index: Some(source.index()),
-                    });
+                    if let Some(source) = texture_image(document, &info.texture()) {
+                        output.diffuse_texture = Some(texture_ref(path, source));
+                    }
                 }
             }
             if let Some(info) = material.emissive_texture() {
-                let source = info.texture().source();
-                output.emissive_texture = Some(TextureRef {
-                    path: image_path(path, source.index(), image_uri(source.source())),
-                    index: Some(source.index()),
-                });
+                if let Some(source) = texture_image(document, &info.texture()) {
+                    output.emissive_texture = Some(texture_ref(path, source));
+                }
             }
             output
         })
@@ -474,10 +468,47 @@ fn image_uri(source: gltf::image::Source<'_>) -> Option<&str> {
 }
 
 fn image_path(path: &Path, index: usize, uri: Option<&str>) -> PathBuf {
-    uri.map_or_else(
-        || PathBuf::from(format!("gltf-image-{index}")),
-        |uri| path.parent().unwrap_or_else(|| Path::new(".")).join(uri),
-    )
+    uri.and_then(|uri| (!uri.starts_with("data:")).then_some(uri))
+        .map_or_else(
+            || PathBuf::from(format!("gltf-image-{index}")),
+            |uri| {
+                path.parent()
+                    .unwrap_or_else(|| Path::new("."))
+                    .join(decode_uri_path(uri))
+            },
+        )
+}
+
+fn texture_ref(path: &Path, image: gltf::image::Image<'_>) -> TextureRef {
+    TextureRef {
+        path: image_path(path, image.index(), image_uri(image.source())),
+        index: Some(image.index()),
+    }
+}
+
+fn texture_image<'a>(
+    document: &'a gltf::Document,
+    texture: &gltf::Texture<'a>,
+) -> Option<gltf::image::Image<'a>> {
+    texture.source().or_else(|| {
+        extension_texture_source_index(texture).and_then(|index| document.images().nth(index))
+    })
+}
+
+fn extension_texture_source_index(texture: &gltf::Texture<'_>) -> Option<usize> {
+    texture
+        .extension_value("EXT_texture_webp")
+        .or_else(|| texture.extension_value("KHR_texture_basisu"))
+        .or_else(|| texture.extension_value("MSFT_texture_dds"))
+        .and_then(|extension| extension.get("source"))
+        .and_then(|source| source.as_u64())
+        .and_then(|index| usize::try_from(index).ok())
+}
+
+fn decode_uri_path(uri: &str) -> String {
+    urlencoding::decode(uri)
+        .map(|decoded| decoded.into_owned())
+        .unwrap_or_else(|_| uri.to_owned())
 }
 
 /// A `KHR_texture_transform` UV transform (offset, rotation, scale) applied at load
@@ -619,120 +650,91 @@ fn import_channel(
 fn load_textures(
     path: &Path,
     _options: &MeshLoadOptions,
-    images: &[gltf::image::Data],
+    document: &gltf::Document,
+    buffers: &[gltf::buffer::Data],
 ) -> Result<Vec<Texture>> {
-    // glTF images are embedded and already decoded by `gltf::import`, so always load them.
-    // `load_material_textures` stays an OBJ/MTL concern. Every glTF pixel format converts
-    // to RGBA8, so this cannot fail per-image.
-    Ok(images
-        .iter()
-        .enumerate()
-        .map(|(index, image)| gltf_image_to_texture(path, index, image))
-        .collect())
+    // glTF/GLB embeds or references encoded images directly. Decode them here instead of
+    // using `gltf::import_images`, which intentionally leaves texture-container extensions
+    // such as EXT_texture_webp to applications.
+    document
+        .images()
+        .map(|image| decode_gltf_texture(path, image, buffers))
+        .collect()
 }
 
 #[cfg(feature = "textures")]
-fn gltf_image_to_texture(path: &Path, index: usize, image: &gltf::image::Data) -> Texture {
-    Texture::new(
-        image_path(path, index, None),
-        image.width,
-        image.height,
-        convert_image_rgba(image),
-    )
+fn decode_gltf_texture(
+    path: &Path,
+    image: gltf::image::Image<'_>,
+    buffers: &[gltf::buffer::Data],
+) -> Result<Texture> {
+    let (texture_path, bytes) = encoded_image_bytes(path, image, buffers)?;
+    decode_texture(&texture_path, &bytes)
 }
 
 #[cfg(feature = "textures")]
-fn convert_image_rgba(image: &gltf::image::Data) -> Vec<u8> {
-    use gltf::image::Format;
-    match image.format {
-        Format::R8 => image.pixels.iter().flat_map(|&v| [v, v, v, 255]).collect(),
-        Format::R8G8 => image
-            .pixels
-            .chunks_exact(2)
-            .flat_map(|p| [p[0], p[0], p[0], p[1]])
-            .collect(),
-        Format::R8G8B8 => image
-            .pixels
-            .chunks_exact(3)
-            .flat_map(|p| [p[0], p[1], p[2], 255])
-            .collect(),
-        Format::R8G8B8A8 => image.pixels.clone(),
-        Format::R16 => image
-            .pixels
-            .chunks_exact(2)
-            .flat_map(|p| {
-                let v = u16_to_u8(p);
-                [v, v, v, 255]
-            })
-            .collect(),
-        Format::R16G16 => image
-            .pixels
-            .chunks_exact(4)
-            .flat_map(|p| {
-                let r = u16_to_u8(&p[0..2]);
-                [r, r, r, u16_to_u8(&p[2..4])]
-            })
-            .collect(),
-        Format::R16G16B16 => image
-            .pixels
-            .chunks_exact(6)
-            .flat_map(|p| {
-                [
-                    u16_to_u8(&p[0..2]),
-                    u16_to_u8(&p[2..4]),
-                    u16_to_u8(&p[4..6]),
-                    255,
-                ]
-            })
-            .collect(),
-        Format::R16G16B16A16 => image
-            .pixels
-            .chunks_exact(8)
-            .flat_map(|p| {
-                [
-                    u16_to_u8(&p[0..2]),
-                    u16_to_u8(&p[2..4]),
-                    u16_to_u8(&p[4..6]),
-                    u16_to_u8(&p[6..8]),
-                ]
-            })
-            .collect(),
-        Format::R32G32B32FLOAT => image
-            .pixels
-            .chunks_exact(12)
-            .flat_map(|p| {
-                [
-                    f32_to_u8(&p[0..4]),
-                    f32_to_u8(&p[4..8]),
-                    f32_to_u8(&p[8..12]),
-                    255,
-                ]
-            })
-            .collect(),
-        Format::R32G32B32A32FLOAT => image
-            .pixels
-            .chunks_exact(16)
-            .flat_map(|p| {
-                [
-                    f32_to_u8(&p[0..4]),
-                    f32_to_u8(&p[4..8]),
-                    f32_to_u8(&p[8..12]),
-                    f32_to_u8(&p[12..16]),
-                ]
-            })
-            .collect(),
+fn encoded_image_bytes(
+    path: &Path,
+    image: gltf::image::Image<'_>,
+    buffers: &[gltf::buffer::Data],
+) -> Result<(PathBuf, Vec<u8>)> {
+    match image.source() {
+        gltf::image::Source::View { view, .. } => {
+            let parent = buffers.get(view.buffer().index()).ok_or_else(|| {
+                Error::parse(
+                    path,
+                    None,
+                    format!("image {} references missing buffer", image.index()),
+                )
+            })?;
+            let begin = view.offset();
+            let end = begin + view.length();
+            let bytes = parent.0.get(begin..end).ok_or_else(|| {
+                Error::parse(
+                    path,
+                    None,
+                    format!("image {} buffer view is out of bounds", image.index()),
+                )
+            })?;
+            Ok((image_path(path, image.index(), None), bytes.to_vec()))
+        }
+        gltf::image::Source::Uri { uri, .. } => {
+            let texture_path = image_path(path, image.index(), Some(uri));
+            let bytes = read_image_uri(path, uri)?;
+            Ok((texture_path, bytes))
+        }
     }
 }
 
 #[cfg(feature = "textures")]
-fn u16_to_u8(bytes: &[u8]) -> u8 {
-    (u16::from_le_bytes([bytes[0], bytes[1]]) >> 8) as u8
-}
+fn read_image_uri(path: &Path, uri: &str) -> Result<Vec<u8>> {
+    if let Some(data) = uri.strip_prefix("data:") {
+        let (_, encoded) = data.split_once(',').ok_or_else(|| {
+            Error::texture_decode(image_path(path, 0, None), "malformed data URI")
+        })?;
+        use base64::Engine as _;
+        return base64::engine::general_purpose::STANDARD
+            .decode(encoded)
+            .map_err(|err| Error::texture_decode(image_path(path, 0, None), err.to_string()));
+    }
 
-#[cfg(feature = "textures")]
-fn f32_to_u8(bytes: &[u8]) -> u8 {
-    let value = f32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
-    (value.clamp(0.0, 1.0) * 255.0).round() as u8
+    let uri_path = if let Some(rest) = uri.strip_prefix("file://") {
+        PathBuf::from(rest)
+    } else if let Some(rest) = uri.strip_prefix("file:") {
+        PathBuf::from(rest)
+    } else if uri.contains(':') {
+        return Err(Error::parse(
+            path,
+            None,
+            format!("unsupported image URI scheme in {uri}"),
+        ));
+    } else {
+        path.parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join(decode_uri_path(uri))
+    };
+
+    std::fs::read(&uri_path).map_err(|source| Error::io(uri_path, source))
 }
 
 #[cfg(test)]
@@ -812,6 +814,80 @@ mod tests {
             }
         }
         assert!(resolved > 0, "textured box must resolve a base-color map");
+    }
+
+    #[cfg(feature = "textures")]
+    #[test]
+    fn loads_ext_texture_webp_texture_source() {
+        let dir = std::env::temp_dir().join(format!(
+            "ratatui-3dmesh-gltf-webp-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let bin_path = dir.join("mesh.bin");
+        let gltf_path = dir.join("scene.gltf");
+
+        let mut webp = Vec::new();
+        image::codecs::webp::WebPEncoder::new_lossless(&mut webp)
+            .encode(&[255, 0, 0, 255], 1, 1, image::ExtendedColorType::Rgba8)
+            .unwrap();
+        use base64::Engine as _;
+        let webp_data = base64::engine::general_purpose::STANDARD.encode(webp);
+
+        let mut bin = Vec::new();
+        for value in [
+            0.0_f32, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, // positions
+            0.0, 0.0, 1.0, 0.0, 0.0, 1.0, // texcoords
+        ] {
+            bin.extend_from_slice(&value.to_le_bytes());
+        }
+        fs::write(&bin_path, bin).unwrap();
+        fs::write(
+            &gltf_path,
+            format!(
+                r#"{{
+  "asset": {{ "version": "2.0" }},
+  "extensionsUsed": ["EXT_texture_webp"],
+  "extensionsRequired": ["EXT_texture_webp"],
+  "buffers": [{{ "uri": "mesh.bin", "byteLength": 60 }}],
+  "bufferViews": [
+    {{ "buffer": 0, "byteOffset": 0, "byteLength": 36, "target": 34962 }},
+    {{ "buffer": 0, "byteOffset": 36, "byteLength": 24, "target": 34962 }}
+  ],
+  "accessors": [
+    {{ "bufferView": 0, "componentType": 5126, "count": 3, "type": "VEC3", "min": [0, 0, 0], "max": [1, 1, 0] }},
+    {{ "bufferView": 1, "componentType": 5126, "count": 3, "type": "VEC2" }}
+  ],
+  "images": [{{ "uri": "data:image/webp;base64,{webp_data}", "mimeType": "image/webp" }}],
+  "textures": [{{ "extensions": {{ "EXT_texture_webp": {{ "source": 0 }} }} }}],
+  "materials": [{{ "pbrMetallicRoughness": {{ "baseColorTexture": {{ "index": 0 }} }} }}],
+  "meshes": [{{ "primitives": [{{ "attributes": {{ "POSITION": 0, "TEXCOORD_0": 1 }}, "material": 0, "mode": 4 }}] }}],
+  "nodes": [{{ "mesh": 0 }}],
+  "scenes": [{{ "nodes": [0] }}],
+  "scene": 0
+}}"#
+            ),
+        )
+        .unwrap();
+
+        let mesh = load_gltf(&gltf_path, &MeshLoadOptions::default()).unwrap();
+        assert_eq!(mesh.textures.len(), 1);
+        assert_eq!(mesh.textures[0].width, 1);
+        assert_eq!(mesh.textures[0].height, 1);
+        assert_eq!(mesh.textures[0].rgba.as_ref(), &[255, 0, 0, 255]);
+        assert_eq!(
+            mesh.materials[0]
+                .diffuse_texture
+                .as_ref()
+                .and_then(|texture| texture.index),
+            Some(0)
+        );
+
+        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]
