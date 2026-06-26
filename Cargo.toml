@@ -1,6 +1,6 @@
 [package]
 name = "ratatui-3dmesh"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 rust-version = "1.88"
 description = "A reusable Ratatui widget for rendering OBJ/glTF/GLB 3D meshes as shaded terminal ASCII."
