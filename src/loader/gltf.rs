@@ -292,20 +292,18 @@ fn append_primitive(
         || indices_for_positions(positions.len()),
         |indices| indices.into_u32().collect::<Vec<_>>(),
     );
-
-    for tri in source_indices.chunks_exact(3) {
-        let local = [tri[0] as usize, tri[1] as usize, tri[2] as usize];
+    let attributes = PrimitiveFaceAttributes {
+        base_vertex,
+        base_uv,
+        base_normal,
+        uvs: &uvs,
+        read_normals: &read_normals,
+        normals: &geometry.normals,
+    };
+    for local in triangle_indices(primitive.mode(), &source_indices) {
         if local.iter().any(|&idx| idx >= positions.len()) {
             continue;
         }
-        let attributes = PrimitiveFaceAttributes {
-            base_vertex,
-            base_uv,
-            base_normal,
-            uvs: &uvs,
-            read_normals: &read_normals,
-            normals: &geometry.normals,
-        };
         geometry
             .faces
             .push(build_face(local, &attributes, material_name.clone()));
@@ -452,6 +450,55 @@ fn build_face(
             .then(|| attributes.normals[attributes.base_normal + idx])
     });
     face
+}
+
+fn triangle_indices(mode: gltf::mesh::Mode, indices: &[u32]) -> Vec<[usize; 3]> {
+    match mode {
+        gltf::mesh::Mode::Triangles => indices
+            .chunks_exact(3)
+            .map(|tri| [tri[0] as usize, tri[1] as usize, tri[2] as usize])
+            .collect(),
+        gltf::mesh::Mode::TriangleStrip => indices
+            .windows(3)
+            .enumerate()
+            .filter_map(|(index, tri)| {
+                let triangle = if index % 2 == 0 {
+                    [tri[0], tri[1], tri[2]]
+                } else {
+                    [tri[1], tri[0], tri[2]]
+                };
+                (!degenerate_u32(triangle)).then_some([
+                    triangle[0] as usize,
+                    triangle[1] as usize,
+                    triangle[2] as usize,
+                ])
+            })
+            .collect(),
+        gltf::mesh::Mode::TriangleFan => indices
+            .get(0)
+            .map(|&first| {
+                indices[1..]
+                    .windows(2)
+                    .filter_map(|edge| {
+                        let triangle = [first, edge[0], edge[1]];
+                        (!degenerate_u32(triangle)).then_some([
+                            triangle[0] as usize,
+                            triangle[1] as usize,
+                            triangle[2] as usize,
+                        ])
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
+        gltf::mesh::Mode::Points
+        | gltf::mesh::Mode::Lines
+        | gltf::mesh::Mode::LineLoop
+        | gltf::mesh::Mode::LineStrip => Vec::new(),
+    }
+}
+
+fn degenerate_u32(triangle: [u32; 3]) -> bool {
+    triangle[0] == triangle[1] || triangle[1] == triangle[2] || triangle[0] == triangle[2]
 }
 
 fn indices_for_positions(len: usize) -> Vec<u32> {
@@ -786,6 +833,41 @@ mod tests {
             [1.0, 2.0, 3.0],
         );
         assert_eq!(point, Vec3::new(3.0, 5.0, 7.0));
+    }
+
+    #[test]
+    fn expands_gltf_triangle_strip_and_fan_modes() {
+        assert_eq!(
+            triangle_indices(gltf::mesh::Mode::TriangleStrip, &[0, 1, 2, 3, 4]),
+            vec![[0, 1, 2], [2, 1, 3], [2, 3, 4]]
+        );
+        assert_eq!(
+            triangle_indices(gltf::mesh::Mode::TriangleFan, &[0, 1, 2, 3]),
+            vec![[0, 1, 2], [0, 2, 3]]
+        );
+        assert_eq!(
+            triangle_indices(gltf::mesh::Mode::TriangleStrip, &[0, 1, 1, 2, 3]),
+            vec![[1, 2, 3]]
+        );
+        assert!(triangle_indices(gltf::mesh::Mode::LineStrip, &[0, 1, 2]).is_empty());
+    }
+
+    #[test]
+    fn panda_glb_loads_triangle_strip_faces() {
+        let path = Path::new("models/panda.glb");
+        if !path.exists() {
+            return;
+        }
+        let mesh = load_gltf(path, &MeshLoadOptions::default()).unwrap();
+
+        assert_eq!(mesh.faces.len(), 174);
+        assert!(
+            mesh.faces
+                .iter()
+                .any(|face| face.material.as_deref() == Some("ear_black")
+                    && face.indices == [708, 709, 710]),
+            "triangle-strip primitive should expand into contiguous black-material faces"
+        );
     }
 
     #[cfg(feature = "textures")]
