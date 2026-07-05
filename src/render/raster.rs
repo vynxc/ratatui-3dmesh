@@ -53,18 +53,6 @@ fn plot_i32(
     ch: char,
     style: Style,
 ) {
-    plot_i32_with_depth_bias(area, buf, zbuf, point, ch, style, 0.0);
-}
-
-fn plot_i32_with_depth_bias(
-    area: Rect,
-    buf: &mut Buffer,
-    zbuf: &mut [f32],
-    point: CellPoint,
-    ch: char,
-    style: Style,
-    depth_bias: f32,
-) {
     if point.x < 0
         || point.y < 0
         || point.x >= i32::from(area.width)
@@ -75,27 +63,12 @@ fn plot_i32_with_depth_bias(
     let ux = point.x as u16;
     let uy = point.y as u16;
     let idx = usize::from(uy) * usize::from(area.width) + usize::from(ux);
-    if point.depth - depth_bias < zbuf[idx] {
+    if point.depth < zbuf[idx] {
         zbuf[idx] = point.depth;
         let cell = &mut buf[(area.x + ux, area.y + uy)];
         cell.set_char(ch);
         cell.set_style(style);
     }
-}
-
-/// Styling and depth behavior for a z-buffered line.
-#[derive(Debug, Clone, Copy)]
-pub struct LineStroke {
-    /// Start vertex.
-    pub a: ProjectedVertex,
-    /// End vertex.
-    pub b: ProjectedVertex,
-    /// Glyph to draw.
-    pub ch: char,
-    /// Cell style to apply.
-    pub style: Style,
-    /// Small comparison bias for overlays on already-filled surfaces.
-    pub depth_bias: f32,
 }
 
 /// Draw a z-buffered line.
@@ -108,39 +81,15 @@ pub fn draw_line(
     ch: char,
     style: Style,
 ) {
-    draw_line_stroke(
-        area,
-        buf,
-        zbuf,
-        LineStroke {
-            a,
-            b,
-            ch,
-            style,
-            depth_bias: 0.0,
-        },
-    );
-}
-
-/// Draw a z-buffered line stroke.
-pub fn draw_line_stroke(area: Rect, buf: &mut Buffer, zbuf: &mut [f32], stroke: LineStroke) {
-    let dx = stroke.b.x - stroke.a.x;
-    let dy = stroke.b.y - stroke.a.y;
+    let dx = b.x - a.x;
+    let dy = b.y - a.y;
     let steps = dx.abs().max(dy.abs()).ceil().max(1.0) as i32;
     for i in 0..=steps {
         let t = i as f32 / steps as f32;
-        let x = (stroke.a.x + dx * t).round() as i32;
-        let y = (stroke.a.y + dy * t).round() as i32;
-        let depth = stroke.a.depth + (stroke.b.depth - stroke.a.depth) * t;
-        plot_i32_with_depth_bias(
-            area,
-            buf,
-            zbuf,
-            CellPoint { x, y, depth },
-            stroke.ch,
-            stroke.style,
-            stroke.depth_bias.max(0.0),
-        );
+        let x = (a.x + dx * t).round() as i32;
+        let y = (a.y + dy * t).round() as i32;
+        let depth = a.depth + (b.depth - a.depth) * t;
+        plot_i32(area, buf, zbuf, CellPoint { x, y, depth }, ch, style);
     }
 }
 

@@ -183,8 +183,7 @@ impl ControlMap {
             }
             KeyCode::Char('m') => {
                 config.render_mode = match config.render_mode {
-                    RenderMode::Solid => RenderMode::Opaque,
-                    RenderMode::Opaque => RenderMode::Wireframe,
+                    RenderMode::Solid => RenderMode::Wireframe,
                     RenderMode::Wireframe => RenderMode::Points,
                     RenderMode::Points => RenderMode::Solid,
                 };
@@ -229,47 +228,14 @@ impl ControlMap {
 mod tests {
     use super::*;
 
-    fn char_key(ch: char) -> KeyEvent {
-        KeyEvent::from(KeyCode::Char(ch))
-    }
-
     #[test]
     fn controls_mutate_state() {
         let map = ControlMap::default();
         let mut state = Mesh3dState::default();
         let mut config = Mesh3dConfig::default();
         let before = state.zoom;
-        let action = map.handle_key(char_key('+'), &mut state, &mut config);
+        let action = map.handle_key(KeyEvent::from(KeyCode::Char('+')), &mut state, &mut config);
         assert_eq!(action, Some(ControlAction::Zoom));
         assert!(state.zoom > before);
-    }
-
-    #[test]
-    fn render_mode_cycle_includes_opaque() {
-        let map = ControlMap::default();
-        let mut state = Mesh3dState::default();
-        let mut config = Mesh3dConfig::default();
-
-        assert_eq!(config.render_mode, RenderMode::Solid);
-        assert_eq!(
-            map.handle_key(char_key('m'), &mut state, &mut config),
-            Some(ControlAction::ToggleRenderMode)
-        );
-        assert_eq!(config.render_mode, RenderMode::Opaque);
-        assert_eq!(
-            map.handle_key(char_key('m'), &mut state, &mut config),
-            Some(ControlAction::ToggleRenderMode)
-        );
-        assert_eq!(config.render_mode, RenderMode::Wireframe);
-        assert_eq!(
-            map.handle_key(char_key('m'), &mut state, &mut config),
-            Some(ControlAction::ToggleRenderMode)
-        );
-        assert_eq!(config.render_mode, RenderMode::Points);
-        assert_eq!(
-            map.handle_key(char_key('m'), &mut state, &mut config),
-            Some(ControlAction::ToggleRenderMode)
-        );
-        assert_eq!(config.render_mode, RenderMode::Solid);
     }
 }

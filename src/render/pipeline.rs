@@ -10,12 +10,8 @@ use crate::{
 use super::{
     camera::{project, ProjectedVertex},
     color::{add_emissive, emissive_rgb, luminance, solid_base_rgb, style_for, texture_rgb},
-    raster::{draw_line, draw_line_stroke, fill_triangle_shaded, plot, Fragment, LineStroke},
+    raster::{draw_line, fill_triangle_shaded, plot, Fragment},
 };
-
-/// Small depth bias for the opaque detail overlay so edges on the filled surface can
-/// repaint the same cells without making hidden back-side edges bleed through.
-const DETAIL_EDGE_DEPTH_BIAS: f32 = 0.002;
 
 /// Depth bias (in post-normalize world units) applied to translucent BLEND fragments so
 /// decals coincident with the opaque surface behind them win the depth test.
@@ -97,16 +93,13 @@ pub fn render_mesh(
         light,
         backdrop,
     };
-    if matches!(config.render_mode, RenderMode::Solid | RenderMode::Opaque) {
+    if matches!(config.render_mode, RenderMode::Solid) {
         let (opaque, blend) = partition_faces(&mesh, &projected, config);
         for &face_index in &opaque {
             draw_face(&ctx, face_index, area, buf, &mut zbuf, config);
         }
         for &face_index in &blend {
             draw_face(&ctx, face_index, area, buf, &mut zbuf, config);
-        }
-        if matches!(config.render_mode, RenderMode::Opaque) {
-            draw_detail_edges(&ctx, area, buf, &mut zbuf, config);
         }
     } else {
         let limit = config.max_faces.unwrap_or(usize::MAX);
@@ -215,7 +208,7 @@ fn draw_face(
         let ch = config.glyph_for_intensity(intensity);
 
         match config.render_mode {
-            RenderMode::Solid | RenderMode::Opaque => {
+            RenderMode::Solid => {
                 let shading = FaceShading {
                     mesh,
                     material,
@@ -248,80 +241,6 @@ fn draw_face(
             }
         }
     }
-}
-
-fn draw_detail_edges(
-    ctx: &DrawContext<'_>,
-    area: Rect,
-    buf: &mut Buffer,
-    zbuf: &mut [f32],
-    config: &Mesh3dConfig,
-) {
-    let limit = config.max_faces.unwrap_or(usize::MAX);
-    for face_index in 0..ctx.mesh.faces.len().min(limit) {
-        draw_face_edges(ctx, face_index, area, buf, zbuf, config);
-    }
-}
-
-fn draw_face_edges(
-    ctx: &DrawContext<'_>,
-    face_index: usize,
-    area: Rect,
-    buf: &mut Buffer,
-    zbuf: &mut [f32],
-    config: &Mesh3dConfig,
-) {
-    let mesh = ctx.mesh;
-    let face = &mesh.faces[face_index];
-    if face.indices.len() < 3 {
-        return;
-    }
-    let material = mesh.material(face.material.as_deref().unwrap_or_default());
-    let double_sided = material.is_some_and(|m| m.double_sided);
-    for corners in triangulate_corners(face.indices.len()) {
-        let [ca, cb, cc] = corners;
-        let [a_i, b_i, c_i] = [face.indices[ca], face.indices[cb], face.indices[cc]];
-        let Some(a) = ctx.projected.get(a_i).copied() else {
-            continue;
-        };
-        let Some(b) = ctx.projected.get(b_i).copied() else {
-            continue;
-        };
-        let Some(c) = ctx.projected.get(c_i).copied() else {
-            continue;
-        };
-        let normal = face
-            .normal
-            .map(|n| n.rotate_euler(ctx.rotation).normalized())
-            .unwrap_or_else(|| (b.view - a.view).cross(c.view - a.view).normalized());
-        if config.backface_culling && !double_sided && normal.z <= 0.0 {
-            continue;
-        }
-        let intensity =
-            (config.ambient + config.diffuse * normal.dot(ctx.light).abs()).clamp(0.0, 1.0);
-        let edge_intensity = detail_edge_intensity(intensity);
-        let ch = config.glyph_for_intensity(edge_intensity);
-        let style = style_for(
-            material,
-            diffuse_texture(mesh, material),
-            edge_intensity,
-            config,
-        );
-        let edge_stroke = |a, b| LineStroke {
-            a,
-            b,
-            ch,
-            style,
-            depth_bias: DETAIL_EDGE_DEPTH_BIAS,
-        };
-        draw_line_stroke(area, buf, zbuf, edge_stroke(a, b));
-        draw_line_stroke(area, buf, zbuf, edge_stroke(b, c));
-        draw_line_stroke(area, buf, zbuf, edge_stroke(c, a));
-    }
-}
-
-fn detail_edge_intensity(intensity: f32) -> f32 {
-    (intensity + 0.35).clamp(0.0, 1.0)
 }
 
 struct FaceShading<'a> {
@@ -376,14 +295,7 @@ fn shade_cell(
             }
             1.0
         }
-        AlphaMode::Blend => {
-            let coverage = base_alpha * texel_alpha;
-            if matches!(config.render_mode, RenderMode::Opaque) && coverage > 0.003 {
-                1.0
-            } else {
-                coverage
-            }
-        }
+        AlphaMode::Blend => base_alpha * texel_alpha,
     };
     if alpha <= 0.003 {
         return None;
@@ -620,47 +532,6 @@ mod tests {
             .unwrap();
         terminal
     }
-    fn overlapping_blend_mesh() -> Mesh {
-        let mut mesh = Mesh::with_attributes(
-            "two-quads",
-            vec![
-                // back quad (red, opaque) slightly farther
-                Vec3::new(-0.8, -0.8, 0.2),
-                Vec3::new(0.8, -0.8, 0.2),
-                Vec3::new(0.8, 0.8, 0.2),
-                Vec3::new(-0.8, 0.8, 0.2),
-                // front quad (blue, blend) nearer
-                Vec3::new(-0.8, -0.8, -0.2),
-                Vec3::new(0.8, -0.8, -0.2),
-                Vec3::new(0.8, 0.8, -0.2),
-                Vec3::new(-0.8, 0.8, -0.2),
-            ],
-            vec![Vec2::new(0.0, 0.0); 8],
-            vec![],
-            vec![
-                {
-                    let mut f = Face::new(vec![0, 1, 2, 3]);
-                    f.material = Some("red".into());
-                    f
-                },
-                {
-                    let mut f = Face::new(vec![4, 5, 6, 7]);
-                    f.material = Some("blue".into());
-                    f
-                },
-            ],
-            vec![],
-        )
-        .unwrap();
-        let mut red = Material::new("red");
-        red.diffuse = [1.0, 0.0, 0.0];
-        let mut blue = Material::new("blue");
-        blue.diffuse = [0.0, 0.0, 1.0];
-        blue.alpha_mode = AlphaMode::Blend;
-        blue.base_color_alpha = 0.5;
-        mesh.materials = vec![red, blue];
-        mesh
-    }
 
     fn painted(terminal: &Terminal<TestBackend>) -> bool {
         terminal
@@ -877,7 +748,44 @@ mod tests {
     fn blend_material_composites_over_background() {
         // A blue blend quad at alpha 0.5 over a red opaque quad behind it should land on a
         // purple-ish blend rather than pure blue or pure red.
-        let mesh = overlapping_blend_mesh();
+        let mut mesh = Mesh::with_attributes(
+            "two-quads",
+            vec![
+                // back quad (red, opaque) slightly farther
+                Vec3::new(-0.8, -0.8, 0.2),
+                Vec3::new(0.8, -0.8, 0.2),
+                Vec3::new(0.8, 0.8, 0.2),
+                Vec3::new(-0.8, 0.8, 0.2),
+                // front quad (blue, blend) nearer
+                Vec3::new(-0.8, -0.8, -0.2),
+                Vec3::new(0.8, -0.8, -0.2),
+                Vec3::new(0.8, 0.8, -0.2),
+                Vec3::new(-0.8, 0.8, -0.2),
+            ],
+            vec![Vec2::new(0.0, 0.0); 8],
+            vec![],
+            vec![
+                {
+                    let mut f = Face::new(vec![0, 1, 2, 3]);
+                    f.material = Some("red".into());
+                    f
+                },
+                {
+                    let mut f = Face::new(vec![4, 5, 6, 7]);
+                    f.material = Some("blue".into());
+                    f
+                },
+            ],
+            vec![],
+        )
+        .unwrap();
+        let mut red = Material::new("red");
+        red.diffuse = [1.0, 0.0, 0.0];
+        let mut blue = Material::new("blue");
+        blue.diffuse = [0.0, 0.0, 1.0];
+        blue.alpha_mode = AlphaMode::Blend;
+        blue.base_color_alpha = 0.5;
+        mesh.materials = vec![red, blue];
 
         let config = Mesh3dConfig::default()
             .backface_culling(false)
@@ -894,49 +802,6 @@ mod tests {
         assert!(
             blended,
             "blend material should mix with the opaque quad behind it"
-        );
-    }
-
-    #[test]
-    fn opaque_mode_forces_blend_materials_to_cover_background() {
-        let mesh = overlapping_blend_mesh();
-        let config = Mesh3dConfig::default()
-            .render_mode(RenderMode::Opaque)
-            .backface_culling(false)
-            .color_mode(ColorMode::Material)
-            .normalize(false)
-            .background_style(Some(ratatui::style::Style::default().bg(Color::Black)));
-        let terminal = render(&mesh, &config);
-        let has_blue = terminal
-            .backend()
-            .buffer()
-            .content()
-            .iter()
-            .any(|cell| matches!(cell.fg, Color::Rgb(r, _, b) if b > 80 && r < 20));
-        assert!(
-            has_blue,
-            "opaque mode should draw the nearer blend material without red showing through"
-        );
-    }
-
-    #[test]
-    fn opaque_mode_draws_detail_edge_overlay() {
-        let mesh = quad_mesh();
-        let config = Mesh3dConfig::default()
-            .render_mode(RenderMode::Opaque)
-            .backface_culling(false)
-            .color_mode(ColorMode::Lighting)
-            .lighting(0.0, 0.0);
-        let terminal = render(&mesh, &config);
-        let has_bright_edge = terminal
-            .backend()
-            .buffer()
-            .content()
-            .iter()
-            .any(|cell| matches!(cell.fg, Color::Rgb(r, g, b) if r > 80 && g > 80 && b > 80));
-        assert!(
-            has_bright_edge,
-            "opaque mode should overlay bright depth-tested detail edges"
         );
     }
 

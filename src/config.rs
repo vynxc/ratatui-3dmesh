@@ -7,8 +7,6 @@ pub enum RenderMode {
     /// Filled triangles with depth buffering and lighting.
     #[default]
     Solid,
-    /// Opaque filled triangles with a depth-tested detail edge overlay.
-    Opaque,
     /// Edges only.
     Wireframe,
     /// Vertices only.
