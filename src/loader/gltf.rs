@@ -58,6 +58,7 @@ pub fn load_gltf(path: &Path, options: &MeshLoadOptions) -> Result<Mesh> {
     )?;
     mesh.bind_vertices = geometry.bind_vertices;
     mesh.bind_normals = geometry.bind_normals;
+    mesh.vertex_colors = geometry.vertex_colors;
     mesh.animation_nodes = geometry.animation_nodes;
     mesh.skins = geometry.skins;
     mesh.animations = animations;
@@ -80,6 +81,7 @@ struct GeometryParts {
     tex_coords: Vec<Vec2>,
     normals: Vec<Vec3>,
     bind_normals: Vec<Vec3>,
+    vertex_colors: Vec<[f32; 4]>,
     faces: Vec<Face>,
     animation_nodes: Vec<AnimationNode>,
     skins: Vec<SkinBinding>,
@@ -170,10 +172,9 @@ fn collect_geometry(
             .collect(),
         ..GeometryParts::default()
     };
-    let base_transforms = geometry
-        .animation_nodes
-        .iter()
-        .map(|node| (node.index, node.base_transform))
+    let local_matrices = document
+        .nodes()
+        .map(|node| (node.index(), node.transform().matrix()))
         .collect::<Vec<_>>();
     let world_transforms = geometry
         .animation_nodes
@@ -181,7 +182,7 @@ fn collect_geometry(
         .map(|node| {
             (
                 node.index,
-                base_global_matrix(node.index, &geometry.animation_nodes, &base_transforms),
+                base_global_matrix(node.index, &parents, &local_matrices),
             )
         })
         .collect::<Vec<_>>();
@@ -284,6 +285,13 @@ fn append_primitive(
             .map(|&normal| transform_normal(transform, normal)),
     );
 
+    let colors = reader.read_colors(0).map_or_else(Vec::new, |colors| {
+        colors.into_rgba_f32().collect::<Vec<_>>()
+    });
+    geometry
+        .vertex_colors
+        .extend((0..positions.len()).map(|index| colors.get(index).copied().unwrap_or([1.0; 4])));
+
     let material_name = primitive
         .material()
         .index()
@@ -343,32 +351,28 @@ fn collect_node_parents(document: &gltf::Document) -> Vec<Option<usize>> {
 
 fn base_global_matrix(
     node_index: usize,
-    nodes: &[AnimationNode],
-    local_transforms: &[(usize, NodeTransform)],
+    parents: &[Option<usize>],
+    local_matrices: &[(usize, [[f32; 4]; 4])],
 ) -> [[f32; 4]; 4] {
-    base_global_matrix_inner(node_index, nodes, local_transforms, 0)
+    base_global_matrix_inner(node_index, parents, local_matrices, 0)
 }
 
 fn base_global_matrix_inner(
     node_index: usize,
-    nodes: &[AnimationNode],
-    local_transforms: &[(usize, NodeTransform)],
+    parents: &[Option<usize>],
+    local_matrices: &[(usize, [[f32; 4]; 4])],
     depth: usize,
 ) -> [[f32; 4]; 4] {
-    if depth > nodes.len() {
+    if depth > parents.len() {
         return identity_matrix();
     }
-    let Some(node) = nodes.iter().find(|node| node.index == node_index) else {
-        return identity_matrix();
-    };
-    let local = local_transforms
+    let local = local_matrices
         .iter()
         .find(|(index, _)| *index == node_index)
-        .map(|(_, transform)| transform.matrix())
-        .unwrap_or_else(|| node.base_transform.matrix());
-    if let Some(parent) = node.parent {
+        .map_or_else(identity_matrix, |(_, matrix)| *matrix);
+    if let Some(parent) = parents.get(node_index).copied().flatten() {
         multiply_matrix(
-            base_global_matrix_inner(parent, nodes, local_transforms, depth + 1),
+            base_global_matrix_inner(parent, parents, local_matrices, depth + 1),
             local,
         )
     } else {
@@ -475,7 +479,7 @@ fn triangle_indices(mode: gltf::mesh::Mode, indices: &[u32]) -> Vec<[usize; 3]> 
             })
             .collect(),
         gltf::mesh::Mode::TriangleFan => indices
-            .get(0)
+            .first()
             .map(|&first| {
                 indices[1..]
                     .windows(2)
@@ -833,6 +837,121 @@ mod tests {
             [1.0, 2.0, 3.0],
         );
         assert_eq!(point, Vec3::new(3.0, 5.0, 7.0));
+    }
+
+    #[test]
+    fn loads_vertex_colors() {
+        let dir = std::env::temp_dir().join(format!(
+            "ratatui-3dmesh-gltf-colors-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let bin_path = dir.join("mesh.bin");
+        let gltf_path = dir.join("scene.gltf");
+
+        let mut bin = Vec::new();
+        for value in [0.0_f32, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0] {
+            bin.extend_from_slice(&value.to_le_bytes());
+        }
+        bin.extend_from_slice(&[
+            0, 0, 0, 255, // black
+            255, 0, 0, 255, // red
+            0, 255, 0, 128, // translucent green
+        ]);
+        fs::write(&bin_path, bin).unwrap();
+        fs::write(
+            &gltf_path,
+            r#"{
+  "asset": { "version": "2.0" },
+  "buffers": [{ "uri": "mesh.bin", "byteLength": 48 }],
+  "bufferViews": [
+    { "buffer": 0, "byteOffset": 0, "byteLength": 36, "target": 34962 },
+    { "buffer": 0, "byteOffset": 36, "byteLength": 12, "target": 34962 }
+  ],
+  "accessors": [
+    { "bufferView": 0, "componentType": 5126, "count": 3, "type": "VEC3", "min": [0, 0, 0], "max": [1, 1, 0] },
+    { "bufferView": 1, "componentType": 5121, "normalized": true, "count": 3, "type": "VEC4" }
+  ],
+  "meshes": [{ "primitives": [{ "attributes": { "POSITION": 0, "COLOR_0": 1 }, "mode": 4 }] }],
+  "nodes": [{ "mesh": 0 }],
+  "scenes": [{ "nodes": [0] }],
+  "scene": 0
+}"#,
+        )
+        .unwrap();
+
+        let mesh = load_gltf(&gltf_path, &MeshLoadOptions::default()).unwrap();
+        assert_eq!(mesh.vertex_colors.len(), 3);
+        assert_eq!(mesh.vertex_colors[0], [0.0, 0.0, 0.0, 1.0]);
+        assert_eq!(mesh.vertex_colors[1], [1.0, 0.0, 0.0, 1.0]);
+        assert!((mesh.vertex_colors[2][1] - 1.0).abs() < f32::EPSILON);
+        assert!((mesh.vertex_colors[2][3] - 128.0 / 255.0).abs() < f32::EPSILON);
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn preserves_node_matrix_when_flattening_geometry() {
+        let dir = std::env::temp_dir().join(format!(
+            "ratatui-3dmesh-gltf-matrix-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let bin_path = dir.join("mesh.bin");
+        let gltf_path = dir.join("scene.gltf");
+
+        let mut bin = Vec::new();
+        for value in [
+            0.0_f32, 0.0, 0.0, //
+            1.0, 0.0, 0.0, //
+            0.0, 1.0, 0.0,
+        ] {
+            bin.extend_from_slice(&value.to_le_bytes());
+        }
+        fs::write(&bin_path, bin).unwrap();
+        fs::write(
+            &gltf_path,
+            r#"{
+  "asset": { "version": "2.0" },
+  "buffers": [{ "uri": "mesh.bin", "byteLength": 36 }],
+  "bufferViews": [{ "buffer": 0, "byteOffset": 0, "byteLength": 36, "target": 34962 }],
+  "accessors": [{ "bufferView": 0, "componentType": 5126, "count": 3, "type": "VEC3", "min": [0, 0, 0], "max": [1, 1, 0] }],
+  "meshes": [{ "primitives": [{ "attributes": { "POSITION": 0 }, "mode": 4 }] }],
+  "nodes": [{
+    "mesh": 0,
+    "matrix": [
+      1.0, 0.0, 0.0, 0.0,
+      0.5, 1.0, 0.0, 0.0,
+      0.0, 0.0, 1.0, 0.0,
+      2.0, 3.0, 4.0, 1.0
+    ]
+  }],
+  "scenes": [{ "nodes": [0] }],
+  "scene": 0
+}"#,
+        )
+        .unwrap();
+
+        let matrix = [
+            [1.0, 0.0, 0.0, 0.0],
+            [0.5, 1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+            [2.0, 3.0, 4.0, 1.0],
+        ];
+        let mesh = load_gltf(&gltf_path, &MeshLoadOptions::default()).unwrap();
+        assert_eq!(mesh.vertices[0], transform_point(matrix, [0.0, 0.0, 0.0]));
+        assert_eq!(mesh.vertices[1], transform_point(matrix, [1.0, 0.0, 0.0]));
+        assert_eq!(mesh.vertices[2], transform_point(matrix, [0.0, 1.0, 0.0]));
+
+        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]

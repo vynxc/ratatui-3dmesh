@@ -2,6 +2,10 @@ use ratatui::{buffer::Buffer, layout::Rect, style::Style};
 
 use super::camera::ProjectedVertex;
 
+/// Treat opaque fragments this close in depth as the same surface. This keeps small
+/// authored surface details from being erased by a later triangle in the same shell.
+const OPAQUE_COPLANAR_EPSILON: f32 = 0.075;
+
 /// A shaded fragment produced by the solid rasterizer's paint closure.
 #[derive(Debug, Clone, Copy)]
 pub struct Fragment {
@@ -190,6 +194,9 @@ fn composite(
     let alpha = fragment.alpha.clamp(0.0, 1.0);
     let cell = &mut buf[(area.x + ux, area.y + uy)];
     if alpha >= 0.996 {
+        if point.depth >= zbuf[idx] - OPAQUE_COPLANAR_EPSILON && cell.symbol() != " " {
+            return;
+        }
         zbuf[idx] = point.depth;
         cell.set_char(fragment.ch);
         cell.set_fg(ratatui::style::Color::Rgb(
@@ -227,4 +234,91 @@ fn blend_channel(src: u8, dst: u8, alpha: f32) -> u8 {
 
 fn edge(ax: f32, ay: f32, bx: f32, by: f32, px: f32, py: f32) -> f32 {
     (px - ax) * (by - ay) - (py - ay) * (bx - ax)
+}
+
+#[cfg(test)]
+mod tests {
+    use ratatui::{buffer::Buffer, layout::Rect, style::Color};
+
+    use super::*;
+    use crate::model::Vec3;
+
+    fn vertex(x: f32, y: f32, depth: f32) -> ProjectedVertex {
+        ProjectedVertex {
+            x,
+            y,
+            depth,
+            view: Vec3::new(x, y, depth),
+        }
+    }
+
+    #[test]
+    fn near_coplanar_opaque_fragments_keep_existing_detail() {
+        let area = Rect::new(0, 0, 5, 5);
+        let mut buf = Buffer::empty(area);
+        let mut zbuf = vec![f32::INFINITY; usize::from(area.width) * usize::from(area.height)];
+        let tri = [
+            vertex(1.0, 1.0, 1.0),
+            vertex(4.0, 1.0, 1.0),
+            vertex(1.0, 4.0, 1.0),
+        ];
+
+        fill_triangle_shaded(area, &mut buf, &mut zbuf, tri, [0; 3], 0.0, |_, _| {
+            Some(Fragment {
+                ch: '*',
+                rgb: [255, 255, 255],
+                alpha: 1.0,
+            })
+        });
+        let nearer = [
+            vertex(1.0, 1.0, 0.95),
+            vertex(4.0, 1.0, 0.95),
+            vertex(1.0, 4.0, 0.95),
+        ];
+        fill_triangle_shaded(area, &mut buf, &mut zbuf, nearer, [0; 3], 0.0, |_, _| {
+            Some(Fragment {
+                ch: '-',
+                rgb: [255, 0, 0],
+                alpha: 1.0,
+            })
+        });
+
+        assert_eq!(buf[(2, 2)].symbol(), "*");
+        assert_eq!(buf[(2, 2)].fg, Color::Rgb(255, 255, 255));
+    }
+
+    #[test]
+    fn clearly_nearer_opaque_fragments_overwrite_existing_detail() {
+        let area = Rect::new(0, 0, 5, 5);
+        let mut buf = Buffer::empty(area);
+        let mut zbuf = vec![f32::INFINITY; usize::from(area.width) * usize::from(area.height)];
+        let tri = [
+            vertex(1.0, 1.0, 1.0),
+            vertex(4.0, 1.0, 1.0),
+            vertex(1.0, 4.0, 1.0),
+        ];
+
+        fill_triangle_shaded(area, &mut buf, &mut zbuf, tri, [0; 3], 0.0, |_, _| {
+            Some(Fragment {
+                ch: '*',
+                rgb: [255, 255, 255],
+                alpha: 1.0,
+            })
+        });
+        let nearer = [
+            vertex(1.0, 1.0, 0.8),
+            vertex(4.0, 1.0, 0.8),
+            vertex(1.0, 4.0, 0.8),
+        ];
+        fill_triangle_shaded(area, &mut buf, &mut zbuf, nearer, [0; 3], 0.0, |_, _| {
+            Some(Fragment {
+                ch: '-',
+                rgb: [255, 0, 0],
+                alpha: 1.0,
+            })
+        });
+
+        assert_eq!(buf[(2, 2)].symbol(), "-");
+        assert_eq!(buf[(2, 2)].fg, Color::Rgb(255, 0, 0));
+    }
 }

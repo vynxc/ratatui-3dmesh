@@ -282,6 +282,9 @@ fn shade_cell(
         }
     }
 
+    let vertex_color = interpolate_vertex_color(shading, weights);
+    let vertex_alpha = vertex_color.map_or(1.0, |color| color[3].clamp(0.0, 1.0));
+
     // Coverage from material alpha factor and (for non-opaque modes) texture alpha.
     let alpha_mode = material.map_or(AlphaMode::Opaque, |m| m.alpha_mode);
     let base_alpha = material.map_or(1.0, |m| m.base_color_alpha);
@@ -290,12 +293,12 @@ fn shade_cell(
         AlphaMode::Opaque => 1.0,
         AlphaMode::Mask => {
             let cutoff = material.map_or(0.5, |m| m.alpha_cutoff);
-            if base_alpha * texel_alpha < cutoff {
+            if base_alpha * texel_alpha * vertex_alpha < cutoff {
                 return None;
             }
             1.0
         }
-        AlphaMode::Blend => base_alpha * texel_alpha,
+        AlphaMode::Blend => base_alpha * texel_alpha * vertex_alpha,
     };
     if alpha <= 0.003 {
         return None;
@@ -309,8 +312,14 @@ fn shade_cell(
         material.is_some_and(|m| m.unlit) && !matches!(config.color_mode, ColorMode::Lighting);
     let shade_intensity = if unlit { 1.0 } else { shading.intensity };
     let lit = diffuse_sample.map_or_else(
-        || lit_solid_rgb(material, shade_intensity, config),
-        |rgba| texture_rgb(rgba, shade_intensity, config),
+        || lit_solid_rgb(material, vertex_color, shade_intensity, config),
+        |rgba| {
+            apply_color_factors(
+                texture_rgb(rgba, shade_intensity, config),
+                material,
+                vertex_color,
+            )
+        },
     );
 
     // Emissive contribution keeps authored glowing detail (eye irises) visible even when
@@ -349,10 +358,18 @@ fn glyph_for_cell(shading: &FaceShading<'_>, rgb: [u8; 3], config: &Mesh3dConfig
     }
 }
 
-fn lit_solid_rgb(material: Option<&Material>, intensity: f32, config: &Mesh3dConfig) -> [u8; 3] {
-    let base = solid_base_rgb(material, intensity, config);
+fn lit_solid_rgb(
+    material: Option<&Material>,
+    vertex_color: Option<[f32; 4]>,
+    intensity: f32,
+    config: &Mesh3dConfig,
+) -> [u8; 3] {
+    let mut base = solid_base_rgb(material, intensity, config);
     if matches!(config.color_mode, ColorMode::Lighting) {
         return base;
+    }
+    if !matches!(config.color_mode, ColorMode::Off) {
+        base = apply_vertex_color(base, vertex_color);
     }
     [
         (f32::from(base[0]) * intensity).round() as u8,
@@ -374,6 +391,71 @@ fn interpolate_uv(shading: &FaceShading<'_>, weights: [f32; 3]) -> Option<Vec2> 
         weights[0].mul_add(u0.u, weights[1].mul_add(u1.u, weights[2] * u2.u)),
         weights[0].mul_add(u0.v, weights[1].mul_add(u1.v, weights[2] * u2.v)),
     ))
+}
+
+fn interpolate_vertex_color(shading: &FaceShading<'_>, weights: [f32; 3]) -> Option<[f32; 4]> {
+    if shading.mesh.vertex_colors.is_empty() {
+        return None;
+    }
+    let colors = shading.corners.map(|corner| {
+        shading
+            .face
+            .indices
+            .get(corner)
+            .and_then(|&idx| shading.mesh.vertex_colors.get(idx).copied())
+    });
+    let [c0, c1, c2] = [colors[0]?, colors[1]?, colors[2]?];
+    Some([
+        interpolate_channel(c0[0], c1[0], c2[0], weights),
+        interpolate_channel(c0[1], c1[1], c2[1], weights),
+        interpolate_channel(c0[2], c1[2], c2[2], weights),
+        interpolate_channel(c0[3], c1[3], c2[3], weights),
+    ])
+}
+
+fn interpolate_channel(a: f32, b: f32, c: f32, weights: [f32; 3]) -> f32 {
+    weights[0]
+        .mul_add(a, weights[1].mul_add(b, weights[2] * c))
+        .clamp(0.0, 1.0)
+}
+
+fn apply_color_factors(
+    rgb: [u8; 3],
+    material: Option<&Material>,
+    vertex_color: Option<[f32; 4]>,
+) -> [u8; 3] {
+    apply_vertex_color(apply_material_factor(rgb, material), vertex_color)
+}
+
+fn apply_material_factor(rgb: [u8; 3], material: Option<&Material>) -> [u8; 3] {
+    material.map_or(rgb, |material| {
+        [
+            scale_channel(rgb[0], material.diffuse[0]),
+            scale_channel(rgb[1], material.diffuse[1]),
+            scale_channel(rgb[2], material.diffuse[2]),
+        ]
+    })
+}
+
+fn apply_vertex_color(rgb: [u8; 3], vertex_color: Option<[f32; 4]>) -> [u8; 3] {
+    vertex_color.map_or(rgb, |color| {
+        [
+            scale_channel(rgb[0], color[0]),
+            scale_channel(rgb[1], color[1]),
+            scale_channel(rgb[2], color[2]),
+        ]
+    })
+}
+
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "RGB factor scaling clamps into the valid u8 channel range before casting."
+)]
+fn scale_channel(value: u8, factor: f32) -> u8 {
+    (f32::from(value) * factor.clamp(0.0, 1.0))
+        .round()
+        .clamp(0.0, 255.0) as u8
 }
 
 fn diffuse_texture<'a>(mesh: &'a Mesh, material: Option<&'a Material>) -> Option<&'a Texture> {
@@ -630,6 +712,40 @@ mod tests {
             .content()
             .iter()
             .any(|cell| cell.fg == Color::Rgb(255, 0, 0)));
+    }
+
+    #[test]
+    fn vertex_colors_modulate_material_color() {
+        let mut face = Face::new(vec![0, 1, 2]);
+        face.material = Some("pink".into());
+        let mut material = Material::new("pink");
+        material.diffuse = [1.0, 0.4, 0.7];
+        let mut mesh = Mesh::new(
+            "tri",
+            vec![
+                Vec3::new(-0.8, -0.8, 0.0),
+                Vec3::new(0.8, -0.8, 0.0),
+                Vec3::new(0.0, 0.8, 0.0),
+            ],
+            vec![face],
+            vec![material],
+        )
+        .unwrap();
+        mesh.vertex_colors = vec![[0.0, 0.0, 0.0, 1.0]; 3];
+
+        let terminal = render(
+            &mesh,
+            &Mesh3dConfig::default()
+                .backface_culling(false)
+                .color_mode(ColorMode::Material)
+                .lighting(1.0, 0.0),
+        );
+        assert!(terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .any(|cell| cell.fg == Color::Rgb(0, 0, 0)));
     }
 
     #[test]

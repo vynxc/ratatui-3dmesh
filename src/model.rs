@@ -432,6 +432,9 @@ pub struct Mesh {
     pub normals: Vec<Vec3>,
     /// Original bind-pose vertex normals used for animation sampling.
     pub bind_normals: Vec<Vec3>,
+    /// Per-vertex color factors aligned with [`Self::vertices`] (`COLOR_0` in glTF).
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub vertex_colors: Vec<[f32; 4]>,
     /// Faces/polygons.
     pub faces: Vec<Face>,
     /// Materials referenced by faces.
@@ -494,6 +497,7 @@ impl Mesh {
             tex_coords,
             normals,
             bind_normals,
+            vertex_colors: Vec::new(),
             faces,
             materials,
             textures: Vec::new(),
@@ -569,6 +573,7 @@ impl Mesh {
             tex_coords: self.tex_coords.clone(),
             normals: self.normals.clone(),
             bind_normals: self.bind_normals.clone(),
+            vertex_colors: self.vertex_colors.clone(),
             faces: self.faces.clone(),
             materials: self.materials.clone(),
             textures: self.textures.clone(),
