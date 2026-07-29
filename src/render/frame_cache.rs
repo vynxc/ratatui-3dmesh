@@ -145,9 +145,10 @@ impl FrameCache {
             ((clip_duration * f32::from(self.config.frames_per_second)).round() as usize).max(1);
         let displayed = state.animation_display_time(clip_duration);
         let phase = (displayed / clip_duration).clamp(0.0, 1.0);
-        // Half-open slots keep the final frame active until the animation actually wraps.
-        // Rounding here would alias the last half-frame to slot zero too early.
-        let frame_index = ((phase * frame_count as f32).floor() as usize).min(frame_count - 1);
+        // Choose the nearest sample slot so timestamps produced by `frame / fps` do not
+        // slip into the preceding slot because of floating-point error. Clamping instead
+        // of applying modulo keeps the final half-frame active until the actual wrap.
+        let frame_index = ((phase * frame_count as f32).round() as usize).min(frame_count - 1);
         let signature = render_signature(area, state, config, frame_count);
 
         if self.signature != Some(signature) {

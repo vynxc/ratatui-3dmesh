@@ -115,6 +115,49 @@ fn final_half_frame_does_not_replay_the_first_frame_early() {
 }
 
 #[test]
+fn every_frame_in_a_complete_loop_matches_direct_then_replays_exactly() {
+    let mesh = animated_box();
+    let fps = 15;
+    let direct = PreparedMesh::new(&mesh);
+    let cached = PreparedMesh::new(&mesh).with_frame_cache(FrameCacheConfig::memory(fps));
+    let area = Rect::new(0, 0, 80, 30);
+    let config = Mesh3dConfig::default()
+        .color_mode(ColorMode::Auto)
+        .show_hints(false);
+    let duration = mesh.animations[0].duration_seconds;
+    let frame_count = (duration * f32::from(fps)).round() as usize;
+    let mut warm_frames = Vec::with_capacity(frame_count);
+
+    for frame in 0..frame_count {
+        let state = Mesh3dState {
+            animation_time_seconds: frame as f32 / f32::from(fps),
+            ..Mesh3dState::default()
+        };
+        let direct_output = render_at(&direct, area, &state, &config);
+        let warm_output = render_at(&cached, area, &state, &config);
+        assert_eq!(direct_output, warm_output, "warm frame {frame}");
+        warm_frames.push(warm_output);
+    }
+    let warmed = cached.frame_cache_stats().expect("cache enabled");
+    assert_eq!(warmed.misses, frame_count as u64);
+    assert_eq!(warmed.hits, 0);
+    assert_eq!(warmed.cached_frames, frame_count);
+
+    for (frame, warm_output) in warm_frames.iter().enumerate() {
+        let state = Mesh3dState {
+            animation_time_seconds: duration + frame as f32 / f32::from(fps),
+            ..Mesh3dState::default()
+        };
+        let replay_output = render_at(&cached, area, &state, &config);
+        assert_eq!(&replay_output, warm_output, "replay frame {frame}");
+    }
+    assert_eq!(
+        cached.frame_cache_stats().expect("cache enabled").hits,
+        frame_count as u64
+    );
+}
+
+#[test]
 fn auto_spin_bypasses_frame_cache() {
     let mesh = animated_box();
     let prepared = PreparedMesh::new(&mesh).with_frame_cache(FrameCacheConfig::memory(15));
