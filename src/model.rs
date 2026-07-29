@@ -257,6 +257,44 @@ impl Texture {
         self.average_color
     }
 
+    /// Return a texture resized to fit within `max_dimension`, preserving its aspect ratio.
+    ///
+    /// Textures already within the limit are cheaply cloned through their shared pixel storage.
+    /// A limit of zero leaves the texture unchanged.
+    #[cfg(feature = "textures")]
+    #[must_use]
+    pub fn resized_to_fit(&self, max_dimension: u32) -> Self {
+        let largest_dimension = self.width.max(self.height);
+        if max_dimension == 0 || largest_dimension <= max_dimension || largest_dimension == 0 {
+            return self.clone();
+        }
+        let target_width = ((u64::from(self.width) * u64::from(max_dimension))
+            / u64::from(largest_dimension))
+        .max(1) as u32;
+        let target_height = ((u64::from(self.height) * u64::from(max_dimension))
+            / u64::from(largest_dimension))
+        .max(1) as u32;
+        let Some(source) = image::ImageBuffer::<image::Rgba<u8>, Arc<[u8]>>::from_raw(
+            self.width,
+            self.height,
+            Arc::clone(&self.rgba),
+        ) else {
+            return self.clone();
+        };
+        let resized = image::imageops::resize(
+            &source,
+            target_width,
+            target_height,
+            image::imageops::FilterType::Triangle,
+        );
+        Self::new(
+            self.path.clone(),
+            target_width,
+            target_height,
+            resized.into_raw(),
+        )
+    }
+
     /// Sample the texture using normalized UV coordinates.
     #[must_use]
     pub fn sample_nearest(
@@ -550,6 +588,23 @@ impl Mesh {
         self.materials.iter().find(|m| m.name == name)
     }
 
+    /// Resize oversized textures in place while preserving their aspect ratios.
+    ///
+    /// This is useful for terminal renderers, where source textures can be much larger than
+    /// the terminal cell grid and otherwise consume memory without adding visible detail.
+    /// Returns the number of textures that were resized. A limit of zero changes nothing.
+    #[cfg(feature = "textures")]
+    pub fn limit_texture_size(&mut self, max_dimension: u32) -> usize {
+        let mut resized = 0;
+        for texture in &mut self.textures {
+            if max_dimension > 0 && texture.width.max(texture.height) > max_dimension {
+                *texture = texture.resized_to_fit(max_dimension);
+                resized += 1;
+            }
+        }
+        resized
+    }
+
     /// Return a normalized copy centered around the origin and roughly radius 1.
     #[must_use]
     pub fn normalized(&self) -> Self {
@@ -616,5 +671,15 @@ mod tests {
         assert!(normalized.bounds.radius() <= 1.01);
         assert!(normalized.animations.is_empty());
         assert!(normalized.animation_nodes.is_empty());
+    }
+
+    #[cfg(feature = "textures")]
+    #[test]
+    fn limits_texture_dimensions_without_changing_aspect_ratio() {
+        let texture = Texture::new("wide.png", 4, 2, vec![255; 4 * 2 * 4]);
+        let resized = texture.resized_to_fit(2);
+        assert_eq!((resized.width, resized.height), (2, 1));
+        assert_eq!(resized.rgba.len(), 2 * 4);
+        assert_eq!(resized.path, texture.path);
     }
 }

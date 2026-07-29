@@ -1,3 +1,5 @@
+use std::borrow::Cow;
+
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
@@ -186,7 +188,7 @@ impl Mesh3dState {
 #[derive(Debug, Clone)]
 pub struct Mesh3dWidget<'a> {
     mesh: &'a Mesh,
-    config: Mesh3dConfig,
+    config: Cow<'a, Mesh3dConfig>,
 }
 
 impl<'a> Mesh3dWidget<'a> {
@@ -195,21 +197,28 @@ impl<'a> Mesh3dWidget<'a> {
     pub fn new(mesh: &'a Mesh) -> Self {
         Self {
             mesh,
-            config: Mesh3dConfig::default(),
+            config: Cow::Owned(Mesh3dConfig::default()),
         }
     }
 
     /// Set widget configuration.
     #[must_use]
     pub fn config(mut self, config: Mesh3dConfig) -> Self {
-        self.config = config;
+        self.config = Cow::Owned(config);
+        self
+    }
+
+    /// Borrow a widget configuration without cloning it for this render.
+    #[must_use]
+    pub fn with_config_ref(mut self, config: &'a Mesh3dConfig) -> Self {
+        self.config = Cow::Borrowed(config);
         self
     }
 
     /// Borrow the active configuration.
     #[must_use]
     pub fn config_ref(&self) -> &Mesh3dConfig {
-        &self.config
+        self.config.as_ref()
     }
 }
 
@@ -217,7 +226,7 @@ impl StatefulWidget for Mesh3dWidget<'_> {
     type State = Mesh3dState;
 
     fn render(self, area: Rect, buf: &mut Buffer, state: &mut Self::State) {
-        render_mesh(self.mesh, area, buf, state, &self.config);
+        render_mesh(self.mesh, area, buf, state, self.config.as_ref());
         if self.config.show_hints {
             draw_hints(area, buf, self.mesh, state);
         }

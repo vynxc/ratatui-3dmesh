@@ -353,6 +353,29 @@ pub fn sample_mesh_animation(
     time_seconds: f32,
     looping: bool,
 ) -> Option<Mesh> {
+    let geometry = sample_mesh_geometry(mesh, clip_index, time_seconds, looping)?;
+    let mut out = mesh.clone();
+    out.vertices = geometry.vertices;
+    out.normals = geometry.normals;
+    refresh_face_normals(&mut out.faces, &out.vertices, &out.normals);
+    out.bounds = geometry.bounds;
+    Some(out)
+}
+
+/// Dynamic geometry for a sampled animation pose, without cloning immutable mesh assets.
+pub(crate) struct SampledGeometry {
+    pub vertices: Vec<Vec3>,
+    pub normals: Vec<Vec3>,
+    pub bounds: Bounds,
+}
+
+/// Sample only the vertex and normal data needed by the renderer.
+pub(crate) fn sample_mesh_geometry(
+    mesh: &Mesh,
+    clip_index: usize,
+    time_seconds: f32,
+    looping: bool,
+) -> Option<SampledGeometry> {
     let clip = mesh.animations.get(clip_index)?;
     if clip.channels.is_empty() || mesh.animation_nodes.is_empty() {
         return None;
@@ -400,7 +423,8 @@ pub fn sample_mesh_animation(
         })
         .collect::<Vec<_>>();
 
-    let mut out = mesh.clone();
+    let mut vertices = mesh.vertices.clone();
+    let mut normals = mesh.normals.clone();
     for node in &mesh.animation_nodes {
         let matrix = global_matrices
             .iter()
@@ -411,7 +435,7 @@ pub fn sample_mesh_animation(
             for offset in 0..range.len {
                 let idx = range.start + offset;
                 if let (Some(vertex), Some(bind)) =
-                    (out.vertices.get_mut(idx), mesh.bind_vertices.get(idx))
+                    (vertices.get_mut(idx), mesh.bind_vertices.get(idx))
                 {
                     *vertex = transform_point(matrix, *bind);
                 }
@@ -421,7 +445,7 @@ pub fn sample_mesh_animation(
             for offset in 0..range.len {
                 let idx = range.start + offset;
                 if let (Some(normal), Some(bind)) =
-                    (out.normals.get_mut(idx), mesh.bind_normals.get(idx))
+                    (normals.get_mut(idx), mesh.bind_normals.get(idx))
                 {
                     *normal = transform_normal(matrix, *bind);
                 }
@@ -458,13 +482,13 @@ pub fn sample_mesh_animation(
             let Some(bind) = mesh.bind_vertices.get(idx).copied() else {
                 continue;
             };
-            if let Some(vertex) = out.vertices.get_mut(idx) {
+            if let Some(vertex) = vertices.get_mut(idx) {
                 *vertex = skin_point(bind, influences, &joint_matrices);
             }
             if let Some(normal_range) = skin.normal_range {
                 let normal_idx = normal_range.start + offset;
                 if let (Some(normal), Some(bind_normal)) = (
-                    out.normals.get_mut(normal_idx),
+                    normals.get_mut(normal_idx),
                     mesh.bind_normals.get(normal_idx).copied(),
                 ) {
                     *normal = skin_normal(bind_normal, influences, &joint_matrices);
@@ -473,9 +497,12 @@ pub fn sample_mesh_animation(
         }
     }
 
-    refresh_face_normals(&mut out.faces, &out.vertices, &out.normals);
-    out.bounds = Bounds::from_vertices(&out.vertices).unwrap_or(out.bounds);
-    Some(out)
+    let bounds = Bounds::from_vertices(&vertices).unwrap_or(mesh.bounds);
+    Some(SampledGeometry {
+        vertices,
+        normals,
+        bounds,
+    })
 }
 
 fn global_matrix_for_node(

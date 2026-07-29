@@ -1,7 +1,7 @@
 use ratatui::{buffer::Buffer, layout::Rect, style::Color};
 
 use crate::{
-    animation::sample_mesh_animation,
+    animation::sample_mesh_geometry,
     config::{ColorMode, Mesh3dConfig, RenderMode, TextureFilter},
     model::{AlphaMode, Face, Material, Mesh, Texture, Vec2, Vec3},
     widget::Mesh3dState,
@@ -37,21 +37,39 @@ pub fn render_mesh(
         }
     }
 
-    let mesh = state
-        .selected_animation
-        .and_then(|clip| {
-            sample_mesh_animation(
-                mesh,
-                clip,
-                state.animation_time_seconds,
-                state.animation_looping,
-            )
-        })
-        .unwrap_or_else(|| mesh.clone());
-    let mesh = if config.normalize {
-        mesh.normalized()
+    let sampled_geometry = state.selected_animation.and_then(|clip| {
+        sample_mesh_geometry(
+            mesh,
+            clip,
+            state.animation_time_seconds,
+            state.animation_looping,
+        )
+    });
+    let vertices = sampled_geometry
+        .as_ref()
+        .map_or(mesh.vertices.as_slice(), |geometry| {
+            geometry.vertices.as_slice()
+        });
+    let normals = sampled_geometry
+        .as_ref()
+        .map_or(mesh.normals.as_slice(), |geometry| {
+            geometry.normals.as_slice()
+        });
+    let bounds = sampled_geometry
+        .as_ref()
+        .map_or(mesh.bounds, |geometry| geometry.bounds);
+    let (normalization_center, normalization_scale) = if config.normalize {
+        let radius = bounds.radius();
+        (
+            bounds.center(),
+            if radius > f32::EPSILON {
+                radius.recip()
+            } else {
+                1.0
+            },
+        )
     } else {
-        mesh
+        (Vec3::default(), 1.0)
     };
     let rotation = state.rotation;
     let pan = state.pan;
@@ -64,11 +82,11 @@ pub fn render_mesh(
     .normalized();
     let backdrop = backdrop_rgb(config);
 
-    let projected = mesh
-        .vertices
+    let projected = vertices
         .iter()
         .map(|&v| {
-            let transformed = v.rotate_euler(rotation) + Vec3::new(pan.x, pan.y, 0.0);
+            let normalized = (v - normalization_center) * normalization_scale;
+            let transformed = normalized.rotate_euler(rotation) + Vec3::new(pan.x, pan.y, 0.0);
             project(
                 transformed,
                 area.width,
@@ -87,15 +105,22 @@ pub fn render_mesh(
     // geometry: opaque/mask faces write depth first, then blend faces composite on top,
     // sorted back-to-front. Wireframe/points ignore the split and draw in source order.
     let ctx = DrawContext {
-        mesh: &mesh,
+        mesh,
         projected: &projected,
+        normals,
         rotation,
         light,
         backdrop,
     };
     if matches!(config.render_mode, RenderMode::Solid) {
-        let (opaque, blend) = partition_faces(&mesh, &projected, config);
-        for &face_index in &opaque {
+        let blend = blend_faces(mesh, &projected, config);
+        let limit = mesh.faces.len().min(config.max_faces.unwrap_or(usize::MAX));
+        for face_index in 0..limit {
+            let face = &mesh.faces[face_index];
+            let material = mesh.material(face.material.as_deref().unwrap_or_default());
+            if matches!(material.map(|m| m.alpha_mode), Some(AlphaMode::Blend)) {
+                continue;
+            }
             draw_face(&ctx, face_index, area, buf, &mut zbuf, config);
         }
         for &face_index in &blend {
@@ -112,27 +137,23 @@ pub fn render_mesh(
 struct DrawContext<'a> {
     mesh: &'a Mesh,
     projected: &'a [ProjectedVertex],
+    normals: &'a [Vec3],
     rotation: Vec3,
     light: Vec3,
     backdrop: [u8; 3],
 }
 
-/// Split solid-mode faces into an opaque set (drawn first, writing depth) and a blend set
-/// (drawn after, sorted back-to-front). Respects `max_faces`.
-fn partition_faces(
-    mesh: &Mesh,
-    projected: &[ProjectedVertex],
-    config: &Mesh3dConfig,
-) -> (Vec<usize>, Vec<usize>) {
+/// Collect solid-mode blend faces for the sorted transparency pass.
+///
+/// Opaque faces are streamed directly from the mesh, avoiding a large per-frame allocation
+/// for the overwhelmingly common opaque-only case. Respects `max_faces`.
+fn blend_faces(mesh: &Mesh, projected: &[ProjectedVertex], config: &Mesh3dConfig) -> Vec<usize> {
     let limit = config.max_faces.unwrap_or(usize::MAX);
-    let mut opaque = Vec::new();
     let mut blend = Vec::new();
     for (index, face) in mesh.faces.iter().take(limit).enumerate() {
         let material = mesh.material(face.material.as_deref().unwrap_or_default());
         if matches!(material.map(|m| m.alpha_mode), Some(AlphaMode::Blend)) {
             blend.push(index);
-        } else {
-            opaque.push(index);
         }
     }
     // Back-to-front: larger view depth is farther from the camera, so draw it first.
@@ -141,7 +162,7 @@ fn partition_faces(
             .partial_cmp(&face_depth(mesh, projected, a))
             .unwrap_or(std::cmp::Ordering::Equal)
     });
-    (opaque, blend)
+    blend
 }
 
 fn face_depth(mesh: &Mesh, projected: &[ProjectedVertex], face_index: usize) -> f32 {
@@ -196,11 +217,16 @@ fn draw_face(
             continue;
         };
         let normal = face
-            .normal
-            .map(|n| n.rotate_euler(ctx.rotation).normalized())
+            .normal_indices
+            .iter()
+            .flatten()
+            .next()
+            .and_then(|&index| ctx.normals.get(index).copied())
+            .map(|normal| normal.rotate_euler(ctx.rotation).normalized())
             .unwrap_or_else(|| (b.view - a.view).cross(c.view - a.view).normalized());
+        // The camera looks down +Z, so front faces have normals pointing back toward -Z.
         // Double-sided materials (hair cards, eye/brow decals) must never be culled.
-        if config.backface_culling && !double_sided && normal.z <= 0.0 {
+        if config.backface_culling && !double_sided && normal.z >= 0.0 {
             continue;
         }
         let intensity =
@@ -210,10 +236,25 @@ fn draw_face(
         match config.render_mode {
             RenderMode::Solid => {
                 let shading = FaceShading {
-                    mesh,
                     material,
-                    face,
-                    corners,
+                    uvs: triangle_uvs(mesh, face, corners),
+                    vertex_colors: triangle_vertex_colors(mesh, face, corners),
+                    diffuse_texture: if texture_enabled(config.color_mode) {
+                        diffuse_texture(mesh, material)
+                    } else {
+                        None
+                    },
+                    emissive_texture: if texture_enabled(config.color_mode) {
+                        emissive_texture(mesh, material)
+                    } else {
+                        None
+                    },
+                    flip_v: mesh.flip_texture_v && config.flip_texture_v,
+                    alpha_mode: material.map_or(AlphaMode::Opaque, |m| m.alpha_mode),
+                    base_alpha: material.map_or(1.0, |m| m.base_color_alpha),
+                    alpha_cutoff: material.map_or(0.5, |m| m.alpha_cutoff),
+                    unlit: material.is_some_and(|m| m.unlit)
+                        && !matches!(config.color_mode, ColorMode::Lighting),
                     intensity,
                     fallback_glyph: ch,
                 };
@@ -244,10 +285,16 @@ fn draw_face(
 }
 
 struct FaceShading<'a> {
-    mesh: &'a Mesh,
     material: Option<&'a Material>,
-    face: &'a Face,
-    corners: [usize; 3],
+    uvs: Option<[Vec2; 3]>,
+    vertex_colors: Option<[[f32; 4]; 3]>,
+    diffuse_texture: Option<&'a Texture>,
+    emissive_texture: Option<&'a Texture>,
+    flip_v: bool,
+    alpha_mode: AlphaMode,
+    base_alpha: f32,
+    alpha_cutoff: f32,
+    unlit: bool,
     intensity: f32,
     fallback_glyph: char,
 }
@@ -259,19 +306,13 @@ fn shade_cell(
     weights: [f32; 3],
     config: &Mesh3dConfig,
 ) -> Option<Fragment> {
-    let mesh = shading.mesh;
     let material = shading.material;
-    let uv = interpolate_uv(shading, weights);
-    let flip_v = mesh.flip_texture_v && config.flip_texture_v;
-
-    let diffuse_sample = if texture_enabled(config.color_mode) {
-        uv.and_then(|uv| {
-            diffuse_texture(mesh, material)
-                .map(|texture| sample_texture(texture, uv, flip_v, config))
-        })
-    } else {
-        None
-    };
+    let uv = interpolate_uv(shading.uvs, weights);
+    let diffuse_sample = uv.and_then(|uv| {
+        shading
+            .diffuse_texture
+            .map(|texture| sample_texture(texture, uv, shading.flip_v, config))
+    });
 
     // A fully transparent texel carries no usable color in a terminal cell, so skip it
     // regardless of the material's alpha mode. This keeps texture cut-outs (sprite-style
@@ -282,23 +323,20 @@ fn shade_cell(
         }
     }
 
-    let vertex_color = interpolate_vertex_color(shading, weights);
+    let vertex_color = interpolate_vertex_color(shading.vertex_colors, weights);
     let vertex_alpha = vertex_color.map_or(1.0, |color| color[3].clamp(0.0, 1.0));
 
     // Coverage from material alpha factor and (for non-opaque modes) texture alpha.
-    let alpha_mode = material.map_or(AlphaMode::Opaque, |m| m.alpha_mode);
-    let base_alpha = material.map_or(1.0, |m| m.base_color_alpha);
     let texel_alpha = diffuse_sample.map_or(1.0, |rgba| f32::from(rgba[3]) / 255.0);
-    let alpha = match alpha_mode {
+    let alpha = match shading.alpha_mode {
         AlphaMode::Opaque => 1.0,
         AlphaMode::Mask => {
-            let cutoff = material.map_or(0.5, |m| m.alpha_cutoff);
-            if base_alpha * texel_alpha * vertex_alpha < cutoff {
+            if shading.base_alpha * texel_alpha * vertex_alpha < shading.alpha_cutoff {
                 return None;
             }
             1.0
         }
-        AlphaMode::Blend => base_alpha * texel_alpha * vertex_alpha,
+        AlphaMode::Blend => shading.base_alpha * texel_alpha * vertex_alpha,
     };
     if alpha <= 0.003 {
         return None;
@@ -308,9 +346,11 @@ fn shade_cell(
     // lighting and show their flat base color, so drive shading at full
     // intensity. Lighting-only mode discards material color by design, so it is
     // left untouched.
-    let unlit =
-        material.is_some_and(|m| m.unlit) && !matches!(config.color_mode, ColorMode::Lighting);
-    let shade_intensity = if unlit { 1.0 } else { shading.intensity };
+    let shade_intensity = if shading.unlit {
+        1.0
+    } else {
+        shading.intensity
+    };
     let lit = diffuse_sample.map_or_else(
         || lit_solid_rgb(material, vertex_color, shade_intensity, config),
         |rgba| {
@@ -324,14 +364,11 @@ fn shade_cell(
 
     // Emissive contribution keeps authored glowing detail (eye irises) visible even when
     // lighting is dim.
-    let emissive_sample = if texture_enabled(config.color_mode) {
-        uv.and_then(|uv| {
-            emissive_texture(mesh, material)
-                .map(|texture| sample_texture(texture, uv, flip_v, config))
-        })
-    } else {
-        None
-    };
+    let emissive_sample = uv.and_then(|uv| {
+        shading
+            .emissive_texture
+            .map(|texture| sample_texture(texture, uv, shading.flip_v, config))
+    });
     let emissive = emissive_rgb(material, emissive_sample, config);
     let rgb = add_emissive(lit, emissive);
 
@@ -378,33 +415,37 @@ fn lit_solid_rgb(
     ]
 }
 
-fn interpolate_uv(shading: &FaceShading<'_>, weights: [f32; 3]) -> Option<Vec2> {
-    let uvs = shading.corners.map(|corner| {
-        shading
-            .face
-            .tex_coord_indices
+fn triangle_uvs(mesh: &Mesh, face: &Face, corners: [usize; 3]) -> Option<[Vec2; 3]> {
+    let [a, b, c] = corners.map(|corner| {
+        face.tex_coord_indices
             .get(corner)
-            .and_then(|idx| idx.and_then(|idx| shading.mesh.tex_coords.get(idx).copied()))
+            .and_then(|idx| idx.and_then(|idx| mesh.tex_coords.get(idx).copied()))
     });
-    let [u0, u1, u2] = [uvs[0]?, uvs[1]?, uvs[2]?];
+    Some([a?, b?, c?])
+}
+
+fn interpolate_uv(uvs: Option<[Vec2; 3]>, weights: [f32; 3]) -> Option<Vec2> {
+    let [u0, u1, u2] = uvs?;
     Some(Vec2::new(
         weights[0].mul_add(u0.u, weights[1].mul_add(u1.u, weights[2] * u2.u)),
         weights[0].mul_add(u0.v, weights[1].mul_add(u1.v, weights[2] * u2.v)),
     ))
 }
 
-fn interpolate_vertex_color(shading: &FaceShading<'_>, weights: [f32; 3]) -> Option<[f32; 4]> {
-    if shading.mesh.vertex_colors.is_empty() {
+fn triangle_vertex_colors(mesh: &Mesh, face: &Face, corners: [usize; 3]) -> Option<[[f32; 4]; 3]> {
+    if mesh.vertex_colors.is_empty() {
         return None;
     }
-    let colors = shading.corners.map(|corner| {
-        shading
-            .face
-            .indices
+    let [a, b, c] = corners.map(|corner| {
+        face.indices
             .get(corner)
-            .and_then(|&idx| shading.mesh.vertex_colors.get(idx).copied())
+            .and_then(|&idx| mesh.vertex_colors.get(idx).copied())
     });
-    let [c0, c1, c2] = [colors[0]?, colors[1]?, colors[2]?];
+    Some([a?, b?, c?])
+}
+
+fn interpolate_vertex_color(colors: Option<[[f32; 4]; 3]>, weights: [f32; 3]) -> Option<[f32; 4]> {
+    let [c0, c1, c2] = colors?;
     Some([
         interpolate_channel(c0[0], c1[0], c2[0], weights),
         interpolate_channel(c0[1], c1[1], c2[1], weights),
@@ -515,16 +556,16 @@ fn sample_bilinear(texture: &Texture, uv: Vec2, flip_v: bool, config: &Mesh3dCon
     }
     let x = u * (w - 1.0);
     let y = v * (h - 1.0);
-    let x0 = x.floor() / (w - 1.0).max(1.0);
-    let x1 = x.ceil() / (w - 1.0).max(1.0);
-    let y0 = y.floor() / (h - 1.0).max(1.0);
-    let y1 = y.ceil() / (h - 1.0).max(1.0);
+    let x0 = x.floor() as u32;
+    let x1 = x.ceil() as u32;
+    let y0 = y.floor() as u32;
+    let y1 = y.ceil() as u32;
     let tx = x.fract();
     let ty = y.fract();
-    let p00 = texture.sample_nearest(Vec2::new(x0, y0), config.texture_wrap, false);
-    let p10 = texture.sample_nearest(Vec2::new(x1, y0), config.texture_wrap, false);
-    let p01 = texture.sample_nearest(Vec2::new(x0, y1), config.texture_wrap, false);
-    let p11 = texture.sample_nearest(Vec2::new(x1, y1), config.texture_wrap, false);
+    let p00 = texture_pixel(texture, x0, y0);
+    let p10 = texture_pixel(texture, x1, y0);
+    let p01 = texture_pixel(texture, x0, y1);
+    let p11 = texture_pixel(texture, x1, y1);
     let mut out = [0; 4];
     let alpha = bilinear_channel(p00[3], p10[3], p01[3], p11[3], tx, ty);
     out[3] = alpha;
@@ -538,6 +579,14 @@ fn sample_bilinear(texture: &Texture, uv: Vec2, flip_v: bool, config: &Mesh3dCon
         out[i] = (premultiplied * 255.0 / alpha_f).round().clamp(0.0, 255.0) as u8;
     }
     out
+}
+
+fn texture_pixel(texture: &Texture, x: u32, y: u32) -> [u8; 4] {
+    let index = (y as usize * texture.width as usize + x as usize) * 4;
+    texture
+        .rgba
+        .get(index..index + 4)
+        .map_or([255; 4], |pixel| [pixel[0], pixel[1], pixel[2], pixel[3]])
 }
 
 fn bilinear_channel(c00: u8, c10: u8, c01: u8, c11: u8, tx: f32, ty: f32) -> u8 {
@@ -570,9 +619,8 @@ mod tests {
     };
 
     fn quad_mesh() -> Mesh {
-        // A quad wound clockwise in screen space so its computed normal points away from the
-        // camera (normal.z < 0). One-sided backface culling discards it; a double-sided
-        // material must keep it.
+        // A quad wound clockwise in screen space has a normal pointing toward the camera
+        // (normal.z < 0) because this renderer's camera looks down +Z.
         Mesh::with_attributes(
             "quad",
             vec![
@@ -800,11 +848,52 @@ mod tests {
             .iter()
             .all(|cell| cell.symbol() == " "));
     }
+    #[test]
+    fn close_opaque_decal_overwrites_base_color() {
+        let mut body = Face::new(vec![0, 1, 2, 3]);
+        body.material = Some("body".into());
+        let mut face = Face::new(vec![4, 5, 6, 7]);
+        face.material = Some("face".into());
+        let mut body_material = Material::new("body");
+        body_material.diffuse = [1.0, 0.75, 0.69];
+        let mut face_material = Material::new("face");
+        face_material.diffuse = [0.0, 0.15, 0.19];
+        let mesh = Mesh::new(
+            "layered",
+            vec![
+                Vec3::new(-0.8, -0.8, 0.0),
+                Vec3::new(-0.8, 0.8, 0.0),
+                Vec3::new(0.8, 0.8, 0.0),
+                Vec3::new(0.8, -0.8, 0.0),
+                Vec3::new(-0.3, -0.3, -0.01),
+                Vec3::new(-0.3, 0.3, -0.01),
+                Vec3::new(0.3, 0.3, -0.01),
+                Vec3::new(0.3, -0.3, -0.01),
+            ],
+            vec![body, face],
+            vec![body_material, face_material],
+        )
+        .unwrap();
+
+        let terminal = render(
+            &mesh,
+            &Mesh3dConfig::default()
+                .backface_culling(false)
+                .color_mode(ColorMode::Material)
+                .lighting(1.0, 0.0)
+                .normalize(false),
+        );
+
+        assert!(terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .any(|cell| cell.fg == Color::Rgb(0, 38, 48)));
+    }
 
     #[test]
-    fn double_sided_material_survives_backface_culling() {
-        // The quad faces away from the camera. A one-sided material is culled; a
-        // double-sided one (glTF `doubleSided`) must still render.
+    fn backface_culling_keeps_front_faces_and_discards_back_faces() {
         let mut mesh = quad_mesh();
         mesh.materials.push(Material::new("front"));
         mesh.faces[0].material = Some("front".into());
@@ -812,6 +901,12 @@ mod tests {
         let config = Mesh3dConfig::default()
             .backface_culling(true)
             .color_mode(ColorMode::Material);
+        assert!(
+            painted(&render(&mesh, &config)),
+            "one-sided front face should render"
+        );
+
+        mesh.faces[0].indices.reverse();
         assert!(
             !painted(&render(&mesh, &config)),
             "one-sided back face should cull"

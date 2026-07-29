@@ -2,9 +2,9 @@ use ratatui::{buffer::Buffer, layout::Rect, style::Style};
 
 use super::camera::ProjectedVertex;
 
-/// Treat opaque fragments this close in depth as the same surface. This keeps small
-/// authored surface details from being erased by a later triangle in the same shell.
-const OPAQUE_COPLANAR_EPSILON: f32 = 0.075;
+/// Treat opaque fragments this close in depth as the same surface. This is only a
+/// floating-point tolerance; authored close-surface decals still need to overwrite.
+const OPAQUE_COPLANAR_EPSILON: f32 = 0.001;
 
 /// A shaded fragment produced by the solid rasterizer's paint closure.
 #[derive(Debug, Clone, Copy)]
@@ -130,74 +130,92 @@ pub fn fill_triangle_shaded(
             .ceil()
             .min(f32::from(area.height.saturating_sub(1))) as i32;
     let denom = edge(a.x, a.y, b.x, b.y, c.x, c.y);
-    if denom.abs() <= f32::EPSILON {
+    if denom.abs() <= f32::EPSILON || min_x > max_x || min_y > max_y {
         return;
     }
 
+    let inverse_denom = denom.recip();
+    let step_x = [
+        (c.y - b.y) * inverse_denom,
+        (a.y - c.y) * inverse_denom,
+        (b.y - a.y) * inverse_denom,
+    ];
+    let step_y = [
+        (b.x - c.x) * inverse_denom,
+        (c.x - a.x) * inverse_denom,
+        (a.x - b.x) * inverse_denom,
+    ];
+    let first_x = min_x as f32 + 0.5;
+    let first_y = min_y as f32 + 0.5;
+    let mut row_weights = [
+        edge(b.x, b.y, c.x, c.y, first_x, first_y) * inverse_denom,
+        edge(c.x, c.y, a.x, a.y, first_x, first_y) * inverse_denom,
+        edge(a.x, a.y, b.x, b.y, first_x, first_y) * inverse_denom,
+    ];
+    let row_width = usize::from(area.width);
+
     for y in min_y..=max_y {
+        let mut weights = row_weights;
+        let mut idx = y as usize * row_width + min_x as usize;
         for x in min_x..=max_x {
-            let px = x as f32 + 0.5;
-            let py = y as f32 + 0.5;
-            let w0 = edge(b.x, b.y, c.x, c.y, px, py) / denom;
-            let w1 = edge(c.x, c.y, a.x, a.y, px, py) / denom;
-            let w2 = edge(a.x, a.y, b.x, b.y, px, py) / denom;
+            let [w0, w1, w2] = weights;
             if w0 < -0.0001 || w1 < -0.0001 || w2 < -0.0001 {
+                weights[0] += step_x[0];
+                weights[1] += step_x[1];
+                weights[2] += step_x[2];
+                idx += 1;
                 continue;
             }
             let depth = w0.mul_add(a.depth, w1.mul_add(b.depth, w2 * c.depth));
             // Subtracting the bias lets a decal at the same depth as the surface behind it
             // still pass `depth < existing` and paint on top.
-            if depth - decal_bias >= depth_at(zbuf, area, x, y) {
+            if depth - decal_bias >= zbuf[idx] {
+                weights[0] += step_x[0];
+                weights[1] += step_x[1];
+                weights[2] += step_x[2];
+                idx += 1;
                 continue;
             }
             let Some(fragment) = paint([w0, w1, w2], depth) else {
+                weights[0] += step_x[0];
+                weights[1] += step_x[1];
+                weights[2] += step_x[2];
+                idx += 1;
                 continue;
             };
-            composite(
-                area,
-                buf,
-                zbuf,
-                CellPoint { x, y, depth },
-                fragment,
-                backdrop,
+            composite_indexed(
+                area, buf, zbuf, x as u16, y as u16, idx, depth, fragment, backdrop,
             );
+            weights[0] += step_x[0];
+            weights[1] += step_x[1];
+            weights[2] += step_x[2];
+            idx += 1;
         }
+        row_weights[0] += step_y[0];
+        row_weights[1] += step_y[1];
+        row_weights[2] += step_y[2];
     }
 }
 
-fn depth_at(zbuf: &[f32], area: Rect, x: i32, y: i32) -> f32 {
-    if x < 0 || y < 0 || x >= i32::from(area.width) || y >= i32::from(area.height) {
-        return f32::NEG_INFINITY;
-    }
-    let idx = (y as usize) * usize::from(area.width) + x as usize;
-    zbuf.get(idx).copied().unwrap_or(f32::NEG_INFINITY)
-}
-
-fn composite(
+#[allow(clippy::too_many_arguments)]
+fn composite_indexed(
     area: Rect,
     buf: &mut Buffer,
     zbuf: &mut [f32],
-    point: CellPoint,
+    x: u16,
+    y: u16,
+    idx: usize,
+    depth: f32,
     fragment: Fragment,
     backdrop: [u8; 3],
 ) {
-    if point.x < 0
-        || point.y < 0
-        || point.x >= i32::from(area.width)
-        || point.y >= i32::from(area.height)
-    {
-        return;
-    }
-    let ux = point.x as u16;
-    let uy = point.y as u16;
-    let idx = usize::from(uy) * usize::from(area.width) + usize::from(ux);
     let alpha = fragment.alpha.clamp(0.0, 1.0);
-    let cell = &mut buf[(area.x + ux, area.y + uy)];
+    let cell = &mut buf[(area.x + x, area.y + y)];
     if alpha >= 0.996 {
-        if point.depth >= zbuf[idx] - OPAQUE_COPLANAR_EPSILON && cell.symbol() != " " {
+        if depth >= zbuf[idx] - OPAQUE_COPLANAR_EPSILON && cell.symbol() != " " {
             return;
         }
-        zbuf[idx] = point.depth;
+        zbuf[idx] = depth;
         cell.set_char(fragment.ch);
         cell.set_fg(ratatui::style::Color::Rgb(
             fragment.rgb[0],
@@ -219,7 +237,7 @@ fn composite(
         blend_channel(fragment.rgb[1], dst[1], alpha),
         blend_channel(fragment.rgb[2], dst[2], alpha),
     ];
-    zbuf[idx] = point.depth;
+    zbuf[idx] = depth;
     cell.set_char(fragment.ch);
     cell.set_fg(ratatui::style::Color::Rgb(
         blended[0], blended[1], blended[2],
@@ -253,7 +271,7 @@ mod tests {
     }
 
     #[test]
-    fn near_coplanar_opaque_fragments_keep_existing_detail() {
+    fn effectively_coplanar_opaque_fragments_keep_existing_detail() {
         let area = Rect::new(0, 0, 5, 5);
         let mut buf = Buffer::empty(area);
         let mut zbuf = vec![f32::INFINITY; usize::from(area.width) * usize::from(area.height)];
@@ -271,9 +289,9 @@ mod tests {
             })
         });
         let nearer = [
-            vertex(1.0, 1.0, 0.95),
-            vertex(4.0, 1.0, 0.95),
-            vertex(1.0, 4.0, 0.95),
+            vertex(1.0, 1.0, 0.9995),
+            vertex(4.0, 1.0, 0.9995),
+            vertex(1.0, 4.0, 0.9995),
         ];
         fill_triangle_shaded(area, &mut buf, &mut zbuf, nearer, [0; 3], 0.0, |_, _| {
             Some(Fragment {
