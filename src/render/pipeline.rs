@@ -18,6 +18,7 @@ use super::{
         draw_line, fill_triangle_deferred_profiled, fill_triangle_shaded_with_setup, plot,
         setup_triangle, Fragment,
     },
+    FrameCacheConfig, FrameCacheStats,
 };
 
 /// Depth bias (in post-normalize world units) applied to translucent BLEND fragments so
@@ -33,6 +34,7 @@ pub struct PreparedMesh<'a> {
     emissive_maps: Vec<Option<Box<[[u8; 3]]>>>,
     animation_scratch: std::sync::Mutex<Option<SampledGeometry>>,
     deferred_scratch: std::sync::Mutex<DeferredScratch>,
+    frame_cache: std::sync::Mutex<Option<super::frame_cache::FrameCache>>,
     has_blend: bool,
     deferred_opaque: bool,
 }
@@ -143,6 +145,7 @@ impl<'a> PreparedMesh<'a> {
             emissive_maps,
             animation_scratch: std::sync::Mutex::new(None),
             deferred_scratch: std::sync::Mutex::new(DeferredScratch::default()),
+            frame_cache: std::sync::Mutex::new(None),
             has_blend,
             deferred_opaque,
         }
@@ -152,6 +155,39 @@ impl<'a> PreparedMesh<'a> {
     #[must_use]
     pub const fn mesh(&self) -> &'a Mesh {
         self.mesh
+    }
+
+    /// Enable an opt-in in-memory cache for looping animation frames.
+    ///
+    /// The cache belongs to this prepared mesh and is reused across widget instances.
+    /// Animation sampling is quantized to the configured frame rate so a replayed frame
+    /// is byte-for-byte identical to the corresponding warm-up frame.
+    #[must_use]
+    pub fn with_frame_cache(mut self, config: FrameCacheConfig) -> Self {
+        self.frame_cache = std::sync::Mutex::new(Some(super::frame_cache::FrameCache::new(config)));
+        self
+    }
+
+    /// Return counters for the optional animation-frame cache.
+    #[must_use]
+    pub fn frame_cache_stats(&self) -> Option<FrameCacheStats> {
+        self.frame_cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .map(super::frame_cache::FrameCache::stats)
+    }
+
+    /// Drop all retained animation frames and reset cache counters.
+    pub fn clear_frame_cache(&self) {
+        if let Some(cache) = self
+            .frame_cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_mut()
+        {
+            cache.clear();
+        }
     }
 
     fn can_defer_opaque(&self, config: &Mesh3dConfig) -> bool {
@@ -185,6 +221,49 @@ pub fn render_prepared_mesh(
     state: &Mesh3dState,
     config: &Mesh3dConfig,
 ) {
+    let clip_duration = state
+        .selected_animation
+        .filter(|_| state.animation_looping)
+        .and_then(|index| prepared.mesh.animations.get(index))
+        .map(|clip| clip.duration_seconds)
+        .filter(|duration| duration.is_finite() && *duration > f32::EPSILON);
+    if let Some(clip_duration) = clip_duration.filter(|_| {
+        !state.auto_spin_enabled
+            && prepared.can_defer_opaque(config)
+            && config.background_style.is_none()
+    }) {
+        let mut cache = prepared
+            .frame_cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(cache) = cache.as_mut() {
+            cache.render(
+                area,
+                buf,
+                state,
+                config,
+                clip_duration,
+                |buf, sampled_state| {
+                    render_mesh_impl(
+                        prepared.mesh,
+                        Some(prepared),
+                        area,
+                        buf,
+                        sampled_state,
+                        config,
+                        &mut NoopMetrics,
+                    );
+                    prepared
+                        .deferred_scratch
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .painted
+                        .clone()
+                },
+            );
+            return;
+        }
+    }
     render_mesh_impl(
         prepared.mesh,
         Some(prepared),
@@ -432,6 +511,7 @@ impl Default for DeferredCell {
 struct DeferredScratch {
     occupied: Vec<bool>,
     cells: Vec<DeferredCell>,
+    painted: Vec<u32>,
 }
 
 #[derive(Clone, Copy)]
@@ -458,7 +538,12 @@ fn draw_prepared_deferred<M: Metrics>(
     scratch.occupied.resize(cell_count, false);
     scratch.cells.clear();
     scratch.cells.resize(cell_count, DeferredCell::default());
-    let DeferredScratch { occupied, cells } = &mut *scratch;
+    scratch.painted.clear();
+    let DeferredScratch {
+        occupied,
+        cells,
+        painted,
+    } = &mut *scratch;
     let mut shaders = Vec::with_capacity(prepared.triangles.len().min(32_768));
     let limit = prepared
         .faces
@@ -569,6 +654,7 @@ fn draw_prepared_deferred<M: Metrics>(
             fragment.rgb[1],
             fragment.rgb[2],
         ));
+        painted.push(index as u32);
         metrics.cell_written();
     }
 }

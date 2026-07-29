@@ -40,4 +40,5 @@ pub use controls::{ControlAction, ControlMap};
 pub use error::{Error, Result};
 pub use loader::MeshLoadOptions;
 pub use model::{AlphaMode, Bounds, Face, Material, Mesh, Texture, TextureRef, Vec2, Vec3};
+pub use render::{FrameCacheConfig, FrameCacheStats};
 pub use widget::{Mesh3dState, Mesh3dWidget};

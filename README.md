@@ -141,6 +141,32 @@ let mesh = Mesh::load("examples/assets/gltf/fox.glb")?;
 
 Embedded glTF/GLB animations are imported as `mesh.animations`. This pass supports node translation, rotation, and scale channels with linear or step interpolation, including CPU skinning for glTF meshes with `JOINTS_0`/`WEIGHTS_0`. Morph-target weights and cubic-spline interpolation are left as follow-up scope.
 
+For a looping animation rendered into a stable viewport, an opt-in prepared-mesh
+frame cache can trade a small amount of memory for near-zero steady-state renderer
+work:
+
+```rust,no_run
+use ratatui_3dmesh::{
+    render::PreparedMesh, FrameCacheConfig, Mesh,
+};
+
+# fn prepare() -> ratatui_3dmesh::Result<()> {
+let mesh = Mesh::load("scene.glb")?;
+let prepared = PreparedMesh::new(&mesh)
+    .with_frame_cache(FrameCacheConfig::memory(15).max_bytes(64 * 1024 * 1024));
+# let _ = prepared;
+# Ok(())
+# }
+```
+
+The first loop renders normally and records exact Ratatui cell-paint operations;
+later loops replay those operations without animation sampling, projection,
+rasterization, or texture shading. Viewport, viewer-state, clip, and render-config
+changes invalidate the frames automatically. Caching currently activates only for
+the prepared opaque texture/auto-color path with no background style; other render
+paths transparently continue rendering normally. Use
+`PreparedMesh::frame_cache_stats()` to inspect hits and retained bytes.
+
 Run a bundled asset:
 
 ```bash

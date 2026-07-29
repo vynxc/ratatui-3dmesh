@@ -1,7 +1,7 @@
 use ratatui::style::{Color, Style};
 
 /// High-level rasterization mode.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum RenderMode {
     /// Filled triangles with depth buffering and lighting.
@@ -14,7 +14,7 @@ pub enum RenderMode {
 }
 
 /// Projection model used by the camera.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum ProjectionMode {
     /// Perspective projection with configurable field of view.
@@ -25,7 +25,7 @@ pub enum ProjectionMode {
 }
 
 /// How the widget chooses terminal colors.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum ColorMode {
     /// Ignore model colors and render with the configured foreground style.
@@ -42,7 +42,7 @@ pub enum ColorMode {
 }
 
 /// Texture filtering mode.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum TextureFilter {
     /// Fast nearest-neighbor sampling.
@@ -53,7 +53,7 @@ pub enum TextureFilter {
 }
 
 /// Behavior for UVs outside the `[0, 1]` range.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum TextureWrap {
     /// Repeat the image.
