@@ -297,20 +297,36 @@ impl Texture {
 
     /// Sample the texture using normalized UV coordinates.
     #[must_use]
+    #[inline]
     pub fn sample_nearest(
         &self,
         uv: Vec2,
         wrap: crate::config::TextureWrap,
         flip_v: bool,
     ) -> [u8; 4] {
-        if self.width == 0 || self.height == 0 || self.rgba.len() < 4 {
+        let Some(index) = self.nearest_texel_index(uv, wrap, flip_v) else {
             return [255, 255, 255, 255];
+        };
+        self.rgba_at(index)
+    }
+
+    #[inline(always)]
+    pub(crate) fn nearest_texel_index(
+        &self,
+        uv: Vec2,
+        wrap: crate::config::TextureWrap,
+        flip_v: bool,
+    ) -> Option<usize> {
+        if self.width == 0 || self.height == 0 || self.rgba.len() < 4 {
+            return None;
         }
         let mut u = match wrap {
+            crate::config::TextureWrap::Repeat if uv.u >= 0.0 && uv.u < 1.0 => uv.u,
             crate::config::TextureWrap::Repeat => uv.u.rem_euclid(1.0),
             crate::config::TextureWrap::Clamp => uv.u.clamp(0.0, 1.0),
         };
         let mut v = match wrap {
+            crate::config::TextureWrap::Repeat if uv.v >= 0.0 && uv.v < 1.0 => uv.v,
             crate::config::TextureWrap::Repeat => uv.v.rem_euclid(1.0),
             crate::config::TextureWrap::Clamp => uv.v.clamp(0.0, 1.0),
         };
@@ -319,15 +335,62 @@ impl Texture {
         }
         // Keep exact 1.0 on the last pixel for clamp mode.
         if matches!(wrap, crate::config::TextureWrap::Repeat) {
-            u = u.fract();
-            v = v.fract();
+            if u >= 1.0 {
+                u = 0.0;
+            }
+            if v >= 1.0 {
+                v = 0.0;
+            }
         }
         let x = (u * (self.width.saturating_sub(1)) as f32).round() as u32;
         let y = (v * (self.height.saturating_sub(1)) as f32).round() as u32;
-        let idx = ((y as usize * self.width as usize) + x as usize) * 4;
+        Some(((y as usize * self.width as usize) + x as usize) * 4)
+    }
+
+    #[inline(always)]
+    pub(crate) fn nearest_texel_index_repeat(&self, uv: Vec2, flip_v: bool) -> Option<usize> {
+        if self.width == 0 || self.height == 0 || self.rgba.len() < 4 {
+            return None;
+        }
+        let u = if uv.u >= 0.0 && uv.u < 1.0 {
+            uv.u
+        } else {
+            uv.u.rem_euclid(1.0)
+        };
+        let mut v = if uv.v >= 0.0 && uv.v < 1.0 {
+            uv.v
+        } else {
+            uv.v.rem_euclid(1.0)
+        };
+        if flip_v {
+            v = 1.0 - v;
+        }
+        if v >= 1.0 {
+            v = 0.0;
+        }
+        let x = (u * self.width.saturating_sub(1) as f32).round() as u32;
+        let y = (v * self.height.saturating_sub(1) as f32).round() as u32;
+        Some(((y as usize * self.width as usize) + x as usize) * 4)
+    }
+
+    #[inline(always)]
+    pub(crate) fn rgba_at(&self, index: usize) -> [u8; 4] {
         self.rgba
-            .get(idx..idx + 4)
+            .get(index..index + 4)
             .map_or([255, 255, 255, 255], |p| [p[0], p[1], p[2], p[3]])
+    }
+
+    #[inline(always)]
+    pub(crate) unsafe fn rgba_at_unchecked(&self, index: usize) -> [u8; 4] {
+        debug_assert!(index + 4 <= self.rgba.len());
+        unsafe {
+            [
+                *self.rgba.get_unchecked(index),
+                *self.rgba.get_unchecked(index + 1),
+                *self.rgba.get_unchecked(index + 2),
+                *self.rgba.get_unchecked(index + 3),
+            ]
+        }
     }
 }
 

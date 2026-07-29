@@ -1,21 +1,170 @@
 use ratatui::{buffer::Buffer, layout::Rect, style::Color};
+use std::ops::Range;
 
 use crate::{
-    animation::sample_mesh_geometry,
-    config::{ColorMode, Mesh3dConfig, RenderMode, TextureFilter},
+    animation::{sample_mesh_geometry_reusing, SampledGeometry},
+    config::{ColorMode, Mesh3dConfig, RenderMode, TextureFilter, TextureWrap},
     model::{AlphaMode, Face, Material, Mesh, Texture, Vec2, Vec3},
     widget::Mesh3dState,
 };
 
 use super::{
     camera::{project, ProjectedVertex},
-    color::{add_emissive, emissive_rgb, luminance, solid_base_rgb, style_for, texture_rgb},
-    raster::{draw_line, fill_triangle_shaded, plot, Fragment},
+    color::{
+        add_emissive, emissive_rgb_from_factor, luminance, solid_base_rgb, style_for, texture_rgb,
+    },
+    metrics::{Metrics, NoopMetrics, RenderProfile},
+    raster::{
+        draw_line, fill_triangle_deferred_profiled, fill_triangle_shaded_with_setup, plot,
+        setup_triangle, Fragment,
+    },
 };
 
 /// Depth bias (in post-normalize world units) applied to translucent BLEND fragments so
 /// decals coincident with the opaque surface behind them win the depth test.
 const DECAL_DEPTH_BIAS: f32 = 0.01;
+
+/// Immutable mesh topology prepared for cache-friendly repeated rendering.
+#[derive(Debug)]
+pub struct PreparedMesh<'a> {
+    mesh: &'a Mesh,
+    faces: Vec<PreparedFace<'a>>,
+    triangles: Vec<PreparedTriangle>,
+    emissive_maps: Vec<Option<Box<[[u8; 3]]>>>,
+    animation_scratch: std::sync::Mutex<Option<SampledGeometry>>,
+    deferred_scratch: std::sync::Mutex<DeferredScratch>,
+    has_blend: bool,
+    deferred_opaque: bool,
+}
+
+#[derive(Debug)]
+struct PreparedFace<'a> {
+    triangles: Range<usize>,
+    material: Option<&'a Material>,
+    diffuse_texture: Option<&'a Texture>,
+    emissive_texture: Option<&'a Texture>,
+    emissive_map: Option<usize>,
+    emissive_factor: Option<[f32; 3]>,
+    alpha_mode: AlphaMode,
+    base_alpha: f32,
+    alpha_cutoff: f32,
+    double_sided: bool,
+    unlit: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PreparedTriangle {
+    indices: [usize; 3],
+    normal_index: Option<usize>,
+    uvs: Option<[Vec2; 3]>,
+}
+
+impl<'a> PreparedMesh<'a> {
+    /// Flatten immutable face/material metadata once for repeated rendering.
+    #[must_use]
+    pub fn new(mesh: &'a Mesh) -> Self {
+        let emissive_maps = mesh
+            .materials
+            .iter()
+            .map(|material| {
+                let factor = material.is_emissive().then_some(material.emissive)?;
+                let texture = emissive_texture(mesh, Some(material))?;
+                Some(
+                    texture
+                        .rgba
+                        .chunks_exact(4)
+                        .map(|rgba| {
+                            emissive_rgb_from_factor(
+                                factor,
+                                Some([rgba[0], rgba[1], rgba[2], rgba[3]]),
+                                1.0,
+                            )
+                        })
+                        .collect(),
+                )
+            })
+            .collect();
+        let texture_is_opaque = mesh
+            .textures
+            .iter()
+            .map(|texture| texture.rgba.chunks_exact(4).all(|rgba| rgba[3] >= 16))
+            .collect::<Vec<_>>();
+        let mut faces = Vec::with_capacity(mesh.faces.len());
+        let mut triangles = Vec::with_capacity(mesh.faces.len());
+        let mut has_blend = false;
+        let mut deferred_opaque = true;
+        for face in &mesh.faces {
+            let material = mesh.material(face.material.as_deref().unwrap_or_default());
+            let material_index = material.and_then(|material| {
+                mesh.materials
+                    .iter()
+                    .position(|candidate| std::ptr::eq(candidate, material))
+            });
+            let alpha_mode = material.map_or(AlphaMode::Opaque, |material| material.alpha_mode);
+            has_blend |= matches!(alpha_mode, AlphaMode::Blend);
+            let diffuse_is_opaque = material
+                .and_then(|material| material.diffuse_texture.as_ref())
+                .and_then(|texture| texture.index)
+                .and_then(|index| texture_is_opaque.get(index))
+                .copied()
+                .unwrap_or(true);
+            deferred_opaque &= matches!(alpha_mode, AlphaMode::Opaque) && diffuse_is_opaque;
+            let start = triangles.len();
+            for corners in triangulate_corners(face.indices.len()) {
+                let [a, b, c] = corners.map(|corner| face.indices[corner]);
+                let normal_index = face.normal_indices.iter().flatten().next().copied();
+                triangles.push(PreparedTriangle {
+                    indices: [a, b, c],
+                    normal_index,
+                    uvs: triangle_uvs(mesh, face, corners),
+                });
+            }
+            faces.push(PreparedFace {
+                triangles: start..triangles.len(),
+                material,
+                diffuse_texture: diffuse_texture(mesh, material),
+                emissive_texture: emissive_texture(mesh, material),
+                emissive_map: material_index,
+                emissive_factor: material
+                    .filter(|material| material.is_emissive())
+                    .map(|material| material.emissive),
+                alpha_mode,
+                base_alpha: material.map_or(1.0, |material| material.base_color_alpha),
+                alpha_cutoff: material.map_or(0.5, |material| material.alpha_cutoff),
+                double_sided: material.is_some_and(|material| material.double_sided),
+                unlit: material.is_some_and(|material| material.unlit),
+            });
+        }
+        deferred_opaque &= !has_blend && triangles.len() <= u32::MAX as usize;
+        Self {
+            mesh,
+            faces,
+            triangles,
+            emissive_maps,
+            animation_scratch: std::sync::Mutex::new(None),
+            deferred_scratch: std::sync::Mutex::new(DeferredScratch::default()),
+            has_blend,
+            deferred_opaque,
+        }
+    }
+
+    /// Borrow the source mesh.
+    #[must_use]
+    pub const fn mesh(&self) -> &'a Mesh {
+        self.mesh
+    }
+
+    fn can_defer_opaque(&self, config: &Mesh3dConfig) -> bool {
+        self.deferred_opaque
+            && matches!(config.render_mode, RenderMode::Solid)
+            && matches!(config.color_mode, ColorMode::Texture | ColorMode::Auto)
+            && matches!(config.texture_wrap, TextureWrap::Repeat)
+            && config.texture_lighting
+            && config.color_brightness == 1.0
+            && config.glyph_ramp.is_ascii()
+            && !config.glyph_ramp.is_empty()
+    }
+}
 
 /// Render a mesh into a Ratatui buffer.
 pub fn render_mesh(
@@ -24,6 +173,80 @@ pub fn render_mesh(
     buf: &mut Buffer,
     state: &Mesh3dState,
     config: &Mesh3dConfig,
+) {
+    render_mesh_impl(mesh, None, area, buf, state, config, &mut NoopMetrics);
+}
+
+/// Render cache-friendly prepared mesh topology.
+pub fn render_prepared_mesh(
+    prepared: &PreparedMesh<'_>,
+    area: Rect,
+    buf: &mut Buffer,
+    state: &Mesh3dState,
+    config: &Mesh3dConfig,
+) {
+    render_mesh_impl(
+        prepared.mesh,
+        Some(prepared),
+        area,
+        buf,
+        state,
+        config,
+        &mut NoopMetrics,
+    );
+}
+
+/// Render a mesh while collecting detailed phase timings and raster-work counters.
+///
+/// Use this for diagnostics and benchmarks. [`render_mesh`] uses compile-time-elided
+/// no-op counters, so normal rendering does not pay the per-cell profiling overhead.
+#[must_use]
+pub fn render_mesh_profiled(
+    mesh: &Mesh,
+    area: Rect,
+    buf: &mut Buffer,
+    state: &Mesh3dState,
+    config: &Mesh3dConfig,
+) -> RenderProfile {
+    let total_started = std::time::Instant::now();
+    let mut profile = RenderProfile::default();
+    render_mesh_impl(mesh, None, area, buf, state, config, &mut profile);
+    profile.total = total_started.elapsed();
+    profile
+}
+
+/// Render prepared topology while collecting detailed diagnostics.
+#[must_use]
+pub fn render_prepared_mesh_profiled(
+    prepared: &PreparedMesh<'_>,
+    area: Rect,
+    buf: &mut Buffer,
+    state: &Mesh3dState,
+    config: &Mesh3dConfig,
+) -> RenderProfile {
+    let total_started = std::time::Instant::now();
+    let mut profile = RenderProfile::default();
+    render_mesh_impl(
+        prepared.mesh,
+        Some(prepared),
+        area,
+        buf,
+        state,
+        config,
+        &mut profile,
+    );
+    profile.total = total_started.elapsed();
+    profile
+}
+
+fn render_mesh_impl<M: Metrics>(
+    mesh: &Mesh,
+    prepared: Option<&PreparedMesh<'_>>,
+    area: Rect,
+    buf: &mut Buffer,
+    state: &Mesh3dState,
+    config: &Mesh3dConfig,
+    metrics: &mut M,
 ) {
     if area.width == 0 || area.height == 0 {
         return;
@@ -37,14 +260,24 @@ pub fn render_mesh(
         }
     }
 
+    let phase_started = metrics.start();
     let sampled_geometry = state.selected_animation.and_then(|clip| {
-        sample_mesh_geometry(
+        let reuse = prepared.and_then(|prepared| {
+            prepared
+                .animation_scratch
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take()
+        });
+        sample_mesh_geometry_reusing(
             mesh,
             clip,
             state.animation_time_seconds,
             state.animation_looping,
+            reuse,
         )
     });
+    metrics.finish_animation(phase_started);
     let vertices = sampled_geometry
         .as_ref()
         .map_or(mesh.vertices.as_slice(), |geometry| {
@@ -71,7 +304,7 @@ pub fn render_mesh(
     } else {
         (Vec3::default(), 1.0)
     };
-    let rotation = state.rotation;
+    let rotation = EulerRotation::new(state.rotation);
     let pan = state.pan;
     let zoom = state.zoom * config.scale;
     let light = Vec3::new(
@@ -81,12 +314,14 @@ pub fn render_mesh(
     )
     .normalized();
     let backdrop = backdrop_rgb(config);
+    let glyph_ramp_is_ascii = config.glyph_ramp.is_ascii();
 
+    let phase_started = metrics.start();
     let projected = vertices
         .iter()
         .map(|&v| {
             let normalized = (v - normalization_center) * normalization_scale;
-            let transformed = normalized.rotate_euler(rotation) + Vec3::new(pan.x, pan.y, 0.0);
+            let transformed = rotation.apply(normalized) + Vec3::new(pan.x, pan.y, 0.0);
             project(
                 transformed,
                 area.width,
@@ -98,8 +333,11 @@ pub fn render_mesh(
             )
         })
         .collect::<Vec<_>>();
+    metrics.finish_projection(phase_started);
 
+    let phase_started = metrics.start();
     let mut zbuf = vec![f32::INFINITY; usize::from(area.width) * usize::from(area.height)];
+    metrics.finish_depth_buffer(phase_started);
 
     // Two passes so authored transparency (glTF BLEND) layers correctly over opaque
     // geometry: opaque/mask faces write depth first, then blend faces composite on top,
@@ -108,28 +346,398 @@ pub fn render_mesh(
         mesh,
         projected: &projected,
         normals,
-        rotation,
         light,
+        model_light: rotation.inverse_apply(light),
+        model_camera: rotation.inverse_apply(Vec3::new(0.0, 0.0, 1.0)),
         backdrop,
+        glyph_ramp_is_ascii,
     };
-    if matches!(config.render_mode, RenderMode::Solid) {
+    let phase_started = metrics.start();
+    if let Some(prepared) = prepared {
+        if prepared.can_defer_opaque(config) {
+            draw_prepared_deferred(prepared, &ctx, area, buf, &mut zbuf, config, metrics);
+        } else {
+            draw_prepared_faces(prepared, &ctx, area, buf, &mut zbuf, config, metrics);
+        }
+    } else if matches!(config.render_mode, RenderMode::Solid) {
         let blend = blend_faces(mesh, &projected, config);
+        for _ in &blend {
+            metrics.blend_face();
+        }
         let limit = mesh.faces.len().min(config.max_faces.unwrap_or(usize::MAX));
+        let mut cached_material_name = None;
+        let mut cached_material = None;
         for face_index in 0..limit {
+            metrics.face();
             let face = &mesh.faces[face_index];
-            let material = mesh.material(face.material.as_deref().unwrap_or_default());
+            let material_name = face.material.as_deref().unwrap_or_default();
+            let material = if cached_material_name == Some(material_name) {
+                cached_material
+            } else {
+                cached_material_name = Some(material_name);
+                cached_material = mesh.material(material_name);
+                cached_material
+            };
             if matches!(material.map(|m| m.alpha_mode), Some(AlphaMode::Blend)) {
                 continue;
             }
-            draw_face(&ctx, face_index, area, buf, &mut zbuf, config);
+            draw_face(
+                &ctx, face_index, material, area, buf, &mut zbuf, config, metrics,
+            );
         }
         for &face_index in &blend {
-            draw_face(&ctx, face_index, area, buf, &mut zbuf, config);
+            let face = &mesh.faces[face_index];
+            let material = mesh.material(face.material.as_deref().unwrap_or_default());
+            draw_face(
+                &ctx, face_index, material, area, buf, &mut zbuf, config, metrics,
+            );
         }
     } else {
         let limit = config.max_faces.unwrap_or(usize::MAX);
         for face_index in 0..mesh.faces.len().min(limit) {
-            draw_face(&ctx, face_index, area, buf, &mut zbuf, config);
+            metrics.face();
+            let face = &mesh.faces[face_index];
+            let material = mesh.material(face.material.as_deref().unwrap_or_default());
+            draw_face(
+                &ctx, face_index, material, area, buf, &mut zbuf, config, metrics,
+            );
+        }
+    }
+    metrics.finish_face_rendering(phase_started);
+    if let (Some(prepared), Some(geometry)) = (prepared, sampled_geometry) {
+        *prepared
+            .animation_scratch
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(geometry);
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct DeferredCell {
+    shader: u32,
+    weights: [f32; 3],
+}
+
+impl Default for DeferredCell {
+    fn default() -> Self {
+        Self {
+            shader: u32::MAX,
+            weights: [0.0; 3],
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+struct DeferredScratch {
+    occupied: Vec<bool>,
+    cells: Vec<DeferredCell>,
+}
+
+#[derive(Clone, Copy)]
+struct DeferredShader<'a> {
+    shading: FaceShading<'a>,
+    fast: bool,
+}
+
+fn draw_prepared_deferred<M: Metrics>(
+    prepared: &PreparedMesh<'_>,
+    ctx: &DrawContext<'_>,
+    area: Rect,
+    buf: &mut Buffer,
+    zbuf: &mut [f32],
+    config: &Mesh3dConfig,
+    metrics: &mut M,
+) {
+    let cell_count = usize::from(area.width) * usize::from(area.height);
+    let mut scratch = prepared
+        .deferred_scratch
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    scratch.occupied.clear();
+    scratch.occupied.resize(cell_count, false);
+    scratch.cells.clear();
+    scratch.cells.resize(cell_count, DeferredCell::default());
+    let DeferredScratch { occupied, cells } = &mut *scratch;
+    let mut shaders = Vec::with_capacity(prepared.triangles.len().min(32_768));
+    let limit = prepared
+        .faces
+        .len()
+        .min(config.max_faces.unwrap_or(usize::MAX));
+
+    for face_index in 0..limit {
+        metrics.face();
+        let face = &prepared.faces[face_index];
+        for triangle_index in face.triangles.clone() {
+            metrics.triangle();
+            let triangle = prepared.triangles[triangle_index];
+            let [a_index, b_index, c_index] = triangle.indices;
+            let (Some(a), Some(b), Some(c)) = (
+                ctx.projected.get(a_index).copied(),
+                ctx.projected.get(b_index).copied(),
+                ctx.projected.get(c_index).copied(),
+            ) else {
+                continue;
+            };
+            let (facing, light_dot) = if let Some(normal) = triangle
+                .normal_index
+                .and_then(|index| ctx.normals.get(index).copied())
+            {
+                (normal.dot(ctx.model_camera), normal.dot(ctx.model_light))
+            } else {
+                let normal = (b.view - a.view).cross(c.view - a.view).normalized();
+                (normal.z, normal.dot(ctx.light))
+            };
+            if config.backface_culling && !face.double_sided && facing >= 0.0 {
+                metrics.culled_triangle();
+                continue;
+            }
+            let Some(setup) = setup_triangle(area, [a, b, c]) else {
+                metrics.skipped_triangle();
+                continue;
+            };
+            let intensity = (config.ambient + config.diffuse * light_dot.abs()).clamp(0.0, 1.0);
+            let shading = FaceShading {
+                material: face.material,
+                uvs: triangle.uvs,
+                vertex_colors: triangle_vertex_colors_for_indices(prepared.mesh, triangle.indices),
+                diffuse_texture: texture_enabled(config.color_mode)
+                    .then_some(face.diffuse_texture)
+                    .flatten(),
+                emissive_texture: texture_enabled(config.color_mode)
+                    .then_some(face.emissive_texture)
+                    .flatten(),
+                emissive_map: face
+                    .emissive_map
+                    .and_then(|index| prepared.emissive_maps[index].as_deref()),
+                emissive_factor: face.emissive_factor,
+                glyph_ramp_is_ascii: ctx.glyph_ramp_is_ascii,
+                flip_v: prepared.mesh.flip_texture_v && config.flip_texture_v,
+                alpha_mode: face.alpha_mode,
+                base_alpha: face.base_alpha,
+                alpha_cutoff: face.alpha_cutoff,
+                unlit: face.unlit && !matches!(config.color_mode, ColorMode::Lighting),
+                intensity,
+                fallback_glyph: '#',
+            };
+            let shader = DeferredShader {
+                fast: shading.fast_opaque_texture(config),
+                shading,
+            };
+            let shader_index = shaders.len() as u32;
+            shaders.push(shader);
+            fill_triangle_deferred_profiled(
+                area,
+                zbuf,
+                occupied,
+                [a, b, c],
+                setup,
+                0.0,
+                metrics,
+                |index, weights| {
+                    cells[index] = DeferredCell {
+                        shader: shader_index,
+                        weights,
+                    };
+                },
+            );
+        }
+    }
+
+    let width = usize::from(area.width);
+    for (index, deferred) in cells.iter().enumerate() {
+        if deferred.shader == u32::MAX {
+            continue;
+        }
+        metrics.shade_call();
+        let shader = shaders[deferred.shader as usize];
+        let fragment = if shader.fast {
+            shade_opaque_texture_cell(&shader.shading, deferred.weights, config)
+        } else {
+            shade_cell(&shader.shading, deferred.weights, config)
+        };
+        let Some(fragment) = fragment else {
+            metrics.shade_discarded();
+            continue;
+        };
+        let x = (index % width) as u16;
+        let y = (index / width) as u16;
+        let cell = &mut buf[(area.x + x, area.y + y)];
+        cell.set_char(fragment.ch);
+        cell.set_fg(Color::Rgb(
+            fragment.rgb[0],
+            fragment.rgb[1],
+            fragment.rgb[2],
+        ));
+        metrics.cell_written();
+    }
+}
+
+fn draw_prepared_faces<M: Metrics>(
+    prepared: &PreparedMesh<'_>,
+    ctx: &DrawContext<'_>,
+    area: Rect,
+    buf: &mut Buffer,
+    zbuf: &mut [f32],
+    config: &Mesh3dConfig,
+    metrics: &mut M,
+) {
+    if !matches!(config.render_mode, RenderMode::Solid) {
+        let limit = prepared
+            .faces
+            .len()
+            .min(config.max_faces.unwrap_or(usize::MAX));
+        for face_index in 0..limit {
+            metrics.face();
+            draw_prepared_face(prepared, ctx, face_index, area, buf, zbuf, config, metrics);
+        }
+        return;
+    }
+
+    let limit = prepared
+        .faces
+        .len()
+        .min(config.max_faces.unwrap_or(usize::MAX));
+    for face_index in 0..limit {
+        metrics.face();
+        if matches!(prepared.faces[face_index].alpha_mode, AlphaMode::Blend) {
+            continue;
+        }
+        draw_prepared_face(prepared, ctx, face_index, area, buf, zbuf, config, metrics);
+    }
+    if prepared.has_blend {
+        let mut blend = (0..limit)
+            .filter(|&index| matches!(prepared.faces[index].alpha_mode, AlphaMode::Blend))
+            .collect::<Vec<_>>();
+        for _ in &blend {
+            metrics.blend_face();
+        }
+        blend.sort_by(|&a, &b| {
+            face_depth(prepared.mesh, ctx.projected, b)
+                .partial_cmp(&face_depth(prepared.mesh, ctx.projected, a))
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        for face_index in blend {
+            draw_prepared_face(prepared, ctx, face_index, area, buf, zbuf, config, metrics);
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_prepared_face<M: Metrics>(
+    prepared: &PreparedMesh<'_>,
+    ctx: &DrawContext<'_>,
+    face_index: usize,
+    area: Rect,
+    buf: &mut Buffer,
+    zbuf: &mut [f32],
+    config: &Mesh3dConfig,
+    metrics: &mut M,
+) {
+    let face = &prepared.faces[face_index];
+    let decal_bias = if matches!(face.alpha_mode, AlphaMode::Blend) {
+        DECAL_DEPTH_BIAS
+    } else {
+        0.0
+    };
+    for triangle_index in face.triangles.clone() {
+        metrics.triangle();
+        let triangle = prepared.triangles[triangle_index];
+        let [a_index, b_index, c_index] = triangle.indices;
+        let (Some(a), Some(b), Some(c)) = (
+            ctx.projected.get(a_index).copied(),
+            ctx.projected.get(b_index).copied(),
+            ctx.projected.get(c_index).copied(),
+        ) else {
+            continue;
+        };
+        let (facing, light_dot) = if let Some(normal) = triangle
+            .normal_index
+            .and_then(|index| ctx.normals.get(index).copied())
+        {
+            (normal.dot(ctx.model_camera), normal.dot(ctx.model_light))
+        } else {
+            let normal = (b.view - a.view).cross(c.view - a.view).normalized();
+            (normal.z, normal.dot(ctx.light))
+        };
+        if config.backface_culling && !face.double_sided && facing >= 0.0 {
+            metrics.culled_triangle();
+            continue;
+        }
+        let intensity = (config.ambient + config.diffuse * light_dot.abs()).clamp(0.0, 1.0);
+        if matches!(config.render_mode, RenderMode::Solid) {
+            let Some(setup) = setup_triangle(area, [a, b, c]) else {
+                metrics.skipped_triangle();
+                continue;
+            };
+            let fallback_glyph = if matches!(config.color_mode, ColorMode::Off) {
+                config.glyph_for_intensity_with_ascii(intensity, ctx.glyph_ramp_is_ascii)
+            } else {
+                '#'
+            };
+            let shading = FaceShading {
+                material: face.material,
+                uvs: triangle.uvs,
+                vertex_colors: triangle_vertex_colors_for_indices(prepared.mesh, triangle.indices),
+                diffuse_texture: texture_enabled(config.color_mode)
+                    .then_some(face.diffuse_texture)
+                    .flatten(),
+                emissive_texture: texture_enabled(config.color_mode)
+                    .then_some(face.emissive_texture)
+                    .flatten(),
+                emissive_map: face
+                    .emissive_map
+                    .and_then(|index| prepared.emissive_maps[index].as_deref()),
+                emissive_factor: face.emissive_factor,
+                glyph_ramp_is_ascii: ctx.glyph_ramp_is_ascii,
+                flip_v: prepared.mesh.flip_texture_v && config.flip_texture_v,
+                alpha_mode: face.alpha_mode,
+                base_alpha: face.base_alpha,
+                alpha_cutoff: face.alpha_cutoff,
+                unlit: face.unlit && !matches!(config.color_mode, ColorMode::Lighting),
+                intensity,
+                fallback_glyph,
+            };
+            if shading.fast_opaque_texture(config) {
+                fill_triangle_shaded_with_setup(
+                    area,
+                    buf,
+                    zbuf,
+                    [a, b, c],
+                    setup,
+                    ctx.backdrop,
+                    decal_bias,
+                    metrics,
+                    |weights, _| shade_opaque_texture_cell(&shading, weights, config),
+                );
+            } else {
+                fill_triangle_shaded_with_setup(
+                    area,
+                    buf,
+                    zbuf,
+                    [a, b, c],
+                    setup,
+                    ctx.backdrop,
+                    decal_bias,
+                    metrics,
+                    |weights, _| shade_cell(&shading, weights, config),
+                );
+            }
+        } else {
+            let glyph = config.glyph_for_intensity_with_ascii(intensity, ctx.glyph_ramp_is_ascii);
+            let style = style_for(face.material, None, intensity, config);
+            match config.render_mode {
+                RenderMode::Wireframe => {
+                    draw_line(area, buf, zbuf, a, b, glyph, style);
+                    draw_line(area, buf, zbuf, b, c, glyph, style);
+                    draw_line(area, buf, zbuf, c, a, glyph, style);
+                }
+                RenderMode::Points => {
+                    plot(area, buf, zbuf, a, glyph, style);
+                    plot(area, buf, zbuf, b, glyph, style);
+                    plot(area, buf, zbuf, c, glyph, style);
+                }
+                RenderMode::Solid => unreachable!(),
+            }
         }
     }
 }
@@ -138,9 +746,11 @@ struct DrawContext<'a> {
     mesh: &'a Mesh,
     projected: &'a [ProjectedVertex],
     normals: &'a [Vec3],
-    rotation: Vec3,
     light: Vec3,
+    model_light: Vec3,
+    model_camera: Vec3,
     backdrop: [u8; 3],
+    glyph_ramp_is_ascii: bool,
 }
 
 /// Collect solid-mode blend faces for the sorted transparency pass.
@@ -148,6 +758,13 @@ struct DrawContext<'a> {
 /// Opaque faces are streamed directly from the mesh, avoiding a large per-frame allocation
 /// for the overwhelmingly common opaque-only case. Respects `max_faces`.
 fn blend_faces(mesh: &Mesh, projected: &[ProjectedVertex], config: &Mesh3dConfig) -> Vec<usize> {
+    if !mesh
+        .materials
+        .iter()
+        .any(|material| matches!(material.alpha_mode, AlphaMode::Blend))
+    {
+        return Vec::new();
+    }
     let limit = config.max_faces.unwrap_or(usize::MAX);
     let mut blend = Vec::new();
     for (index, face) in mesh.faces.iter().take(limit).enumerate() {
@@ -182,20 +799,22 @@ fn face_depth(mesh: &Mesh, projected: &[ProjectedVertex], face_index: usize) -> 
     }
 }
 
-fn draw_face(
+#[allow(clippy::too_many_arguments)]
+fn draw_face<M: Metrics>(
     ctx: &DrawContext<'_>,
     face_index: usize,
+    material: Option<&Material>,
     area: Rect,
     buf: &mut Buffer,
     zbuf: &mut [f32],
     config: &Mesh3dConfig,
+    metrics: &mut M,
 ) {
     let mesh = ctx.mesh;
     let face = &mesh.faces[face_index];
     if face.indices.len() < 3 {
         return;
     }
-    let material = mesh.material(face.material.as_deref().unwrap_or_default());
     let double_sided = material.is_some_and(|m| m.double_sided);
     // Translucent decals (glTF BLEND, e.g. eye irises) sit exactly on the opaque surface
     // behind them. A small depth bias lets them win the depth test instead of z-fighting.
@@ -205,6 +824,7 @@ fn draw_face(
         0.0
     };
     for corners in triangulate_corners(face.indices.len()) {
+        metrics.triangle();
         let [ca, cb, cc] = corners;
         let [a_i, b_i, c_i] = [face.indices[ca], face.indices[cb], face.indices[cc]];
         let Some(a) = ctx.projected.get(a_i).copied() else {
@@ -216,25 +836,37 @@ fn draw_face(
         let Some(c) = ctx.projected.get(c_i).copied() else {
             continue;
         };
-        let normal = face
+        let (facing, light_dot) = if let Some(normal) = face
             .normal_indices
             .iter()
             .flatten()
             .next()
             .and_then(|&index| ctx.normals.get(index).copied())
-            .map(|normal| normal.rotate_euler(ctx.rotation).normalized())
-            .unwrap_or_else(|| (b.view - a.view).cross(c.view - a.view).normalized());
+        {
+            (normal.dot(ctx.model_camera), normal.dot(ctx.model_light))
+        } else {
+            let normal = (b.view - a.view).cross(c.view - a.view).normalized();
+            (normal.z, normal.dot(ctx.light))
+        };
         // The camera looks down +Z, so front faces have normals pointing back toward -Z.
         // Double-sided materials (hair cards, eye/brow decals) must never be culled.
-        if config.backface_culling && !double_sided && normal.z >= 0.0 {
+        if config.backface_culling && !double_sided && facing >= 0.0 {
+            metrics.culled_triangle();
             continue;
         }
-        let intensity =
-            (config.ambient + config.diffuse * normal.dot(ctx.light).abs()).clamp(0.0, 1.0);
-        let ch = config.glyph_for_intensity(intensity);
+        let intensity = (config.ambient + config.diffuse * light_dot.abs()).clamp(0.0, 1.0);
 
         match config.render_mode {
             RenderMode::Solid => {
+                let Some(setup) = setup_triangle(area, [a, b, c]) else {
+                    metrics.skipped_triangle();
+                    continue;
+                };
+                let fallback_glyph = if matches!(config.color_mode, ColorMode::Off) {
+                    config.glyph_for_intensity_with_ascii(intensity, ctx.glyph_ramp_is_ascii)
+                } else {
+                    '#'
+                };
                 let shading = FaceShading {
                     material,
                     uvs: triangle_uvs(mesh, face, corners),
@@ -249,6 +881,11 @@ fn draw_face(
                     } else {
                         None
                     },
+                    emissive_map: None,
+                    emissive_factor: material
+                        .filter(|material| material.is_emissive())
+                        .map(|material| material.emissive),
+                    glyph_ramp_is_ascii: ctx.glyph_ramp_is_ascii,
                     flip_v: mesh.flip_texture_v && config.flip_texture_v,
                     alpha_mode: material.map_or(AlphaMode::Opaque, |m| m.alpha_mode),
                     base_alpha: material.map_or(1.0, |m| m.base_color_alpha),
@@ -256,25 +893,29 @@ fn draw_face(
                     unlit: material.is_some_and(|m| m.unlit)
                         && !matches!(config.color_mode, ColorMode::Lighting),
                     intensity,
-                    fallback_glyph: ch,
+                    fallback_glyph,
                 };
-                fill_triangle_shaded(
+                fill_triangle_shaded_with_setup(
                     area,
                     buf,
                     zbuf,
                     [a, b, c],
+                    setup,
                     ctx.backdrop,
                     decal_bias,
+                    metrics,
                     |weights, _| shade_cell(&shading, weights, config),
                 );
             }
             RenderMode::Wireframe => {
+                let ch = config.glyph_for_intensity_with_ascii(intensity, ctx.glyph_ramp_is_ascii);
                 let style = style_for(material, None, intensity, config);
                 draw_line(area, buf, zbuf, a, b, ch, style);
                 draw_line(area, buf, zbuf, b, c, ch, style);
                 draw_line(area, buf, zbuf, c, a, ch, style);
             }
             RenderMode::Points => {
+                let ch = config.glyph_for_intensity_with_ascii(intensity, ctx.glyph_ramp_is_ascii);
                 let style = style_for(material, None, intensity, config);
                 plot(area, buf, zbuf, a, ch, style);
                 plot(area, buf, zbuf, b, ch, style);
@@ -284,12 +925,79 @@ fn draw_face(
     }
 }
 
+#[derive(Clone, Copy)]
+struct EulerRotation {
+    sx: f32,
+    cx: f32,
+    sy: f32,
+    cy: f32,
+    sz: f32,
+    cz: f32,
+}
+
+impl EulerRotation {
+    fn new(rotation: Vec3) -> Self {
+        let (sx, cx) = rotation.x.sin_cos();
+        let (sy, cy) = rotation.y.sin_cos();
+        let (sz, cz) = rotation.z.sin_cos();
+        Self {
+            sx,
+            cx,
+            sy,
+            cy,
+            sz,
+            cz,
+        }
+    }
+
+    #[inline(always)]
+    fn apply(self, value: Vec3) -> Vec3 {
+        let mut rotated = Vec3::new(
+            value.x,
+            value.y * self.cx - value.z * self.sx,
+            value.y * self.sx + value.z * self.cx,
+        );
+        rotated = Vec3::new(
+            rotated.x * self.cy + rotated.z * self.sy,
+            rotated.y,
+            -rotated.x * self.sy + rotated.z * self.cy,
+        );
+        Vec3::new(
+            rotated.x * self.cz - rotated.y * self.sz,
+            rotated.x * self.sz + rotated.y * self.cz,
+            rotated.z,
+        )
+    }
+
+    fn inverse_apply(self, value: Vec3) -> Vec3 {
+        let mut rotated = Vec3::new(
+            value.x * self.cz + value.y * self.sz,
+            -value.x * self.sz + value.y * self.cz,
+            value.z,
+        );
+        rotated = Vec3::new(
+            rotated.x * self.cy - rotated.z * self.sy,
+            rotated.y,
+            rotated.x * self.sy + rotated.z * self.cy,
+        );
+        Vec3::new(
+            rotated.x,
+            rotated.y * self.cx + rotated.z * self.sx,
+            -rotated.y * self.sx + rotated.z * self.cx,
+        )
+    }
+}
+
+#[derive(Clone, Copy)]
 struct FaceShading<'a> {
     material: Option<&'a Material>,
     uvs: Option<[Vec2; 3]>,
     vertex_colors: Option<[[f32; 4]; 3]>,
     diffuse_texture: Option<&'a Texture>,
     emissive_texture: Option<&'a Texture>,
+    emissive_map: Option<&'a [[u8; 3]]>,
+    emissive_factor: Option<[f32; 3]>,
+    glyph_ramp_is_ascii: bool,
     flip_v: bool,
     alpha_mode: AlphaMode,
     base_alpha: f32,
@@ -299,8 +1007,85 @@ struct FaceShading<'a> {
     fallback_glyph: char,
 }
 
+impl FaceShading<'_> {
+    fn fast_opaque_texture(&self, config: &Mesh3dConfig) -> bool {
+        matches!(config.color_mode, ColorMode::Texture | ColorMode::Auto)
+            && self.glyph_ramp_is_ascii
+            && !config.glyph_ramp.is_empty()
+            && matches!(config.texture_filter, TextureFilter::Nearest)
+            && matches!(config.texture_wrap, TextureWrap::Repeat)
+            && config.texture_lighting
+            && config.color_brightness == 1.0
+            && matches!(self.alpha_mode, AlphaMode::Opaque)
+            && !self.unlit
+            && self.uvs.is_some()
+            && self.vertex_colors.is_none()
+            && self.diffuse_texture.is_some_and(|diffuse| {
+                self.emissive_texture.is_some_and(|emissive| {
+                    diffuse.width == emissive.width
+                        && diffuse.height == emissive.height
+                        && (diffuse.width as usize)
+                            .checked_mul(diffuse.height as usize)
+                            .and_then(|texels| texels.checked_mul(4))
+                            .is_some_and(|bytes| diffuse.rgba.len() >= bytes)
+                })
+            })
+            && self.emissive_map.is_some_and(|map| {
+                self.diffuse_texture.is_some_and(|texture| {
+                    (texture.width as usize)
+                        .checked_mul(texture.height as usize)
+                        .is_some_and(|texels| map.len() >= texels)
+                })
+            })
+            && self
+                .material
+                .is_none_or(|material| material.diffuse == [1.0; 3])
+    }
+}
+
+#[inline(always)]
+fn shade_opaque_texture_cell(
+    shading: &FaceShading<'_>,
+    weights: [f32; 3],
+    config: &Mesh3dConfig,
+) -> Option<Fragment> {
+    let texture = shading.diffuse_texture?;
+    let uv = interpolate_uv(shading.uvs, weights)?;
+    let index = texture.nearest_texel_index_repeat(uv, shading.flip_v)?;
+    // `fast_opaque_texture` validates the full declared texture extent.
+    let rgba = unsafe { texture.rgba_at_unchecked(index) };
+    if rgba[3] < 16 {
+        return None;
+    }
+    let emissive = shading
+        .emissive_map
+        .and_then(|map| map.get(index / 4))
+        .copied()
+        .unwrap_or([0, 0, 0]);
+    let rgb = add_emissive(texture_rgb(rgba, shading.intensity, config), emissive);
+    Some(Fragment {
+        ch: fast_ascii_glyph(shading, rgb, config),
+        rgb,
+        alpha: 1.0,
+    })
+}
+
+#[inline(always)]
+fn fast_ascii_glyph(shading: &FaceShading<'_>, rgb: [u8; 3], config: &Mesh3dConfig) -> char {
+    let lum = luminance(rgb);
+    let value = if config.texture_lighting {
+        lum.max(shading.intensity * 0.35)
+    } else {
+        lum.max(shading.intensity)
+    };
+    let glyphs = config.glyph_ramp.as_bytes();
+    let index = (value.clamp(0.0, 1.0) * (glyphs.len() - 1) as f32).round() as usize;
+    char::from(glyphs[index.min(glyphs.len() - 1)])
+}
+
 /// Shade a single covered cell: sample the diffuse texture (if any), apply the material
 /// alpha mode, light the color, and add emissive contribution. Returns `None` to discard.
+#[inline(always)]
 fn shade_cell(
     shading: &FaceShading<'_>,
     weights: [f32; 3],
@@ -308,11 +1093,10 @@ fn shade_cell(
 ) -> Option<Fragment> {
     let material = shading.material;
     let uv = interpolate_uv(shading.uvs, weights);
-    let diffuse_sample = uv.and_then(|uv| {
-        shading
-            .diffuse_texture
-            .map(|texture| sample_texture(texture, uv, shading.flip_v, config))
-    });
+    let (diffuse_sample, emissive_sample, shared_texel_index) = uv
+        .map_or((None, None, None), |uv| {
+            sample_face_textures(shading, uv, config)
+        });
 
     // A fully transparent texel carries no usable color in a terminal cell, so skip it
     // regardless of the material's alpha mode. This keeps texture cut-outs (sprite-style
@@ -364,12 +1148,15 @@ fn shade_cell(
 
     // Emissive contribution keeps authored glowing detail (eye irises) visible even when
     // lighting is dim.
-    let emissive_sample = uv.and_then(|uv| {
-        shading
-            .emissive_texture
-            .map(|texture| sample_texture(texture, uv, shading.flip_v, config))
-    });
-    let emissive = emissive_rgb(material, emissive_sample, config);
+    let emissive = shared_texel_index
+        .and_then(|index| shading.emissive_map.and_then(|map| map.get(index / 4)))
+        .copied()
+        .filter(|_| config.color_brightness == 1.0)
+        .unwrap_or_else(|| {
+            shading.emissive_factor.map_or([0, 0, 0], |factor| {
+                emissive_rgb_from_factor(factor, emissive_sample, config.color_brightness)
+            })
+        });
     let rgb = add_emissive(lit, emissive);
 
     let glyph = glyph_for_cell(shading, rgb, config);
@@ -380,6 +1167,7 @@ fn shade_cell(
     })
 }
 
+#[inline(always)]
 fn glyph_for_cell(shading: &FaceShading<'_>, rgb: [u8; 3], config: &Mesh3dConfig) -> char {
     match config.color_mode {
         ColorMode::Off => shading.fallback_glyph,
@@ -390,7 +1178,7 @@ fn glyph_for_cell(shading: &FaceShading<'_>, rgb: [u8; 3], config: &Mesh3dConfig
             } else {
                 lum.max(shading.intensity)
             };
-            config.glyph_for_intensity(value)
+            config.glyph_for_intensity_with_ascii(value, shading.glyph_ramp_is_ascii)
         }
     }
 }
@@ -424,6 +1212,7 @@ fn triangle_uvs(mesh: &Mesh, face: &Face, corners: [usize; 3]) -> Option<[Vec2; 
     Some([a?, b?, c?])
 }
 
+#[inline(always)]
 fn interpolate_uv(uvs: Option<[Vec2; 3]>, weights: [f32; 3]) -> Option<Vec2> {
     let [u0, u1, u2] = uvs?;
     Some(Vec2::new(
@@ -444,6 +1233,19 @@ fn triangle_vertex_colors(mesh: &Mesh, face: &Face, corners: [usize; 3]) -> Opti
     Some([a?, b?, c?])
 }
 
+#[inline]
+fn triangle_vertex_colors_for_indices(mesh: &Mesh, indices: [usize; 3]) -> Option<[[f32; 4]; 3]> {
+    if mesh.vertex_colors.is_empty() {
+        return None;
+    }
+    Some([
+        *mesh.vertex_colors.get(indices[0])?,
+        *mesh.vertex_colors.get(indices[1])?,
+        *mesh.vertex_colors.get(indices[2])?,
+    ])
+}
+
+#[inline(always)]
 fn interpolate_vertex_color(colors: Option<[[f32; 4]; 3]>, weights: [f32; 3]) -> Option<[f32; 4]> {
     let [c0, c1, c2] = colors?;
     Some([
@@ -470,6 +1272,9 @@ fn apply_color_factors(
 
 fn apply_material_factor(rgb: [u8; 3], material: Option<&Material>) -> [u8; 3] {
     material.map_or(rgb, |material| {
+        if material.diffuse == [1.0; 3] {
+            return rgb;
+        }
         [
             scale_channel(rgb[0], material.diffuse[0]),
             scale_channel(rgb[1], material.diffuse[1]),
@@ -514,11 +1319,46 @@ fn emissive_texture<'a>(mesh: &'a Mesh, material: Option<&'a Material>) -> Optio
     mesh.textures.get(index)
 }
 
+#[inline(always)]
 fn sample_texture(texture: &Texture, uv: Vec2, flip_v: bool, config: &Mesh3dConfig) -> [u8; 4] {
     match config.texture_filter {
         TextureFilter::Nearest => texture.sample_nearest(uv, config.texture_wrap, flip_v),
         TextureFilter::Bilinear => sample_bilinear(texture, uv, flip_v, config),
     }
+}
+
+#[inline(always)]
+fn sample_face_textures(
+    shading: &FaceShading<'_>,
+    uv: Vec2,
+    config: &Mesh3dConfig,
+) -> (Option<[u8; 4]>, Option<[u8; 4]>, Option<usize>) {
+    if matches!(config.texture_filter, TextureFilter::Nearest) {
+        if let (Some(diffuse), Some(emissive)) = (shading.diffuse_texture, shading.emissive_texture)
+        {
+            if diffuse.width == emissive.width && diffuse.height == emissive.height {
+                let index = diffuse.nearest_texel_index(uv, config.texture_wrap, shading.flip_v);
+                return (
+                    index.map(|index| diffuse.rgba_at(index)),
+                    if shading.emissive_map.is_some() && config.color_brightness == 1.0 {
+                        None
+                    } else {
+                        index.map(|index| emissive.rgba_at(index))
+                    },
+                    index,
+                );
+            }
+        }
+    }
+    (
+        shading
+            .diffuse_texture
+            .map(|texture| sample_texture(texture, uv, shading.flip_v, config)),
+        shading
+            .emissive_texture
+            .map(|texture| sample_texture(texture, uv, shading.flip_v, config)),
+        None,
+    )
 }
 
 fn backdrop_rgb(config: &Mesh3dConfig) -> [u8; 3] {
@@ -663,6 +1503,24 @@ mod tests {
         terminal
     }
 
+    fn render_prepared(mesh: &Mesh, config: &Mesh3dConfig) -> Terminal<TestBackend> {
+        let prepared = PreparedMesh::new(mesh);
+        let backend = TestBackend::new(20, 10);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                render_prepared_mesh(
+                    &prepared,
+                    frame.area(),
+                    frame.buffer_mut(),
+                    &Mesh3dState::default(),
+                    config,
+                );
+            })
+            .unwrap();
+        terminal
+    }
+
     fn painted(terminal: &Terminal<TestBackend>) -> bool {
         terminal
             .backend()
@@ -760,6 +1618,37 @@ mod tests {
             .content()
             .iter()
             .any(|cell| cell.fg == Color::Rgb(255, 0, 0)));
+    }
+
+    #[test]
+    fn prepared_opaque_render_matches_direct_render() {
+        let mut mesh = quad_mesh();
+        let mut material = Material::new("opaque");
+        material.diffuse_texture = Some(TextureRef {
+            path: "opaque.png".into(),
+            index: Some(0),
+        });
+        mesh.materials.push(material);
+        mesh.faces[0].material = Some("opaque".into());
+        mesh.textures.push(Texture::new(
+            "opaque.png",
+            2,
+            2,
+            vec![
+                255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 255, 255,
+            ],
+        ));
+        let config = Mesh3dConfig::default()
+            .backface_culling(false)
+            .color_mode(ColorMode::Texture)
+            .texture_filter(TextureFilter::Nearest);
+
+        let direct = render(&mesh, &config);
+        let prepared = render_prepared(&mesh, &config);
+        assert_eq!(
+            direct.backend().buffer().content(),
+            prepared.backend().buffer().content()
+        );
     }
 
     #[test]

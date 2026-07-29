@@ -10,7 +10,7 @@ use ratatui::{
 use crate::{
     config::Mesh3dConfig,
     model::{Mesh, Vec3},
-    render::render_mesh,
+    render::{render_mesh, render_prepared_mesh, PreparedMesh},
 };
 
 /// Persistent viewer state for [`Mesh3dWidget`].
@@ -187,8 +187,23 @@ impl Mesh3dState {
 /// A reusable Ratatui widget that renders a [`Mesh`].
 #[derive(Debug, Clone)]
 pub struct Mesh3dWidget<'a> {
-    mesh: &'a Mesh,
+    source: MeshSource<'a>,
     config: Cow<'a, Mesh3dConfig>,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum MeshSource<'a> {
+    Mesh(&'a Mesh),
+    Prepared(&'a PreparedMesh<'a>),
+}
+
+impl<'a> MeshSource<'a> {
+    const fn mesh(self) -> &'a Mesh {
+        match self {
+            Self::Mesh(mesh) => mesh,
+            Self::Prepared(prepared) => prepared.mesh(),
+        }
+    }
 }
 
 impl<'a> Mesh3dWidget<'a> {
@@ -196,7 +211,16 @@ impl<'a> Mesh3dWidget<'a> {
     #[must_use]
     pub fn new(mesh: &'a Mesh) -> Self {
         Self {
-            mesh,
+            source: MeshSource::Mesh(mesh),
+            config: Cow::Owned(Mesh3dConfig::default()),
+        }
+    }
+
+    /// Create a widget backed by topology prepared once for repeated rendering.
+    #[must_use]
+    pub fn new_prepared(prepared: &'a PreparedMesh<'a>) -> Self {
+        Self {
+            source: MeshSource::Prepared(prepared),
             config: Cow::Owned(Mesh3dConfig::default()),
         }
     }
@@ -226,9 +250,15 @@ impl StatefulWidget for Mesh3dWidget<'_> {
     type State = Mesh3dState;
 
     fn render(self, area: Rect, buf: &mut Buffer, state: &mut Self::State) {
-        render_mesh(self.mesh, area, buf, state, self.config.as_ref());
+        let mesh = self.source.mesh();
+        match self.source {
+            MeshSource::Mesh(mesh) => render_mesh(mesh, area, buf, state, self.config.as_ref()),
+            MeshSource::Prepared(prepared) => {
+                render_prepared_mesh(prepared, area, buf, state, self.config.as_ref());
+            }
+        }
         if self.config.show_hints {
-            draw_hints(area, buf, self.mesh, state);
+            draw_hints(area, buf, mesh, state);
         }
         if self.config.show_help_overlay || state.help_visible {
             draw_help(area, buf);

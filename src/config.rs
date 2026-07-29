@@ -315,14 +315,21 @@ impl Mesh3dConfig {
         self
     }
 
-    pub(crate) fn glyph_for_intensity(&self, intensity: f32) -> char {
-        let glyphs: Vec<char> = self.glyph_ramp.chars().collect();
-        if glyphs.is_empty() {
+    pub(crate) fn glyph_for_intensity_with_ascii(&self, intensity: f32, is_ascii: bool) -> char {
+        if self.glyph_ramp.is_empty() {
             return '#';
         }
+        if is_ascii {
+            let glyphs = self.glyph_ramp.as_bytes();
+            let idx = (intensity.clamp(0.0, 1.0) * (glyphs.len().saturating_sub(1)) as f32).round()
+                as usize;
+            return char::from(glyphs[idx.min(glyphs.len() - 1)]);
+        }
+
+        let glyph_count = self.glyph_ramp.chars().count();
         let idx =
-            (intensity.clamp(0.0, 1.0) * (glyphs.len().saturating_sub(1)) as f32).round() as usize;
-        glyphs[idx.min(glyphs.len() - 1)]
+            (intensity.clamp(0.0, 1.0) * (glyph_count.saturating_sub(1)) as f32).round() as usize;
+        self.glyph_ramp.chars().nth(idx).unwrap_or('#')
     }
 }
 

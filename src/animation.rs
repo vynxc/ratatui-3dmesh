@@ -363,6 +363,7 @@ pub fn sample_mesh_animation(
 }
 
 /// Dynamic geometry for a sampled animation pose, without cloning immutable mesh assets.
+#[derive(Debug)]
 pub(crate) struct SampledGeometry {
     pub vertices: Vec<Vec3>,
     pub normals: Vec<Vec3>,
@@ -376,25 +377,49 @@ pub(crate) fn sample_mesh_geometry(
     time_seconds: f32,
     looping: bool,
 ) -> Option<SampledGeometry> {
+    sample_mesh_geometry_reusing(mesh, clip_index, time_seconds, looping, None)
+}
+
+pub(crate) fn sample_mesh_geometry_reusing(
+    mesh: &Mesh,
+    clip_index: usize,
+    time_seconds: f32,
+    looping: bool,
+    reuse: Option<SampledGeometry>,
+) -> Option<SampledGeometry> {
     let clip = mesh.animations.get(clip_index)?;
     if clip.channels.is_empty() || mesh.animation_nodes.is_empty() {
         return None;
     }
 
     let time = playback_time(time_seconds, clip.duration_seconds, looping);
+    let mut node_positions = vec![
+        usize::MAX;
+        mesh.animation_nodes
+            .iter()
+            .map(|node| node.index)
+            .max()
+            .unwrap_or(0)
+            + 1
+    ];
+    for (position, node) in mesh.animation_nodes.iter().enumerate() {
+        node_positions[node.index] = position;
+    }
     let mut sampled_nodes = mesh
         .animation_nodes
         .iter()
-        .map(|node| (node.index, node.base_transform))
+        .map(|node| node.base_transform)
         .collect::<Vec<_>>();
 
     for channel in &clip.channels {
-        let Some((_, transform)) = sampled_nodes
-            .iter_mut()
-            .find(|(index, _)| *index == channel.target_node)
+        let Some(position) = node_positions
+            .get(channel.target_node)
+            .copied()
+            .filter(|&position| position != usize::MAX)
         else {
             continue;
         };
+        let transform = &mut sampled_nodes[position];
         let Some(value) = channel.sampler.sample(time) else {
             continue;
         };
@@ -412,25 +437,41 @@ pub(crate) fn sample_mesh_geometry(
         }
     }
 
-    let global_matrices = mesh
-        .animation_nodes
+    let local_matrices = sampled_nodes
         .iter()
-        .map(|node| {
-            (
-                node.index,
-                global_matrix_for_node(node.index, &mesh.animation_nodes, &sampled_nodes),
-            )
-        })
+        .map(|transform| transform.matrix())
+        .collect::<Vec<_>>();
+    let mut global_cache = vec![None; mesh.animation_nodes.len()];
+    for position in 0..mesh.animation_nodes.len() {
+        resolve_global_matrix(
+            position,
+            &mesh.animation_nodes,
+            &node_positions,
+            &local_matrices,
+            &mut global_cache,
+            0,
+        );
+    }
+    let global_matrices = global_cache
+        .into_iter()
+        .map(|matrix| matrix.unwrap_or_else(identity_matrix))
         .collect::<Vec<_>>();
 
-    let mut vertices = mesh.vertices.clone();
-    let mut normals = mesh.normals.clone();
-    for node in &mesh.animation_nodes {
-        let matrix = global_matrices
-            .iter()
-            .find(|(index, _)| *index == node.index)
-            .map(|(_, matrix)| *matrix)
-            .unwrap_or_else(identity_matrix);
+    let (mut vertices, mut normals) = reuse.map_or_else(
+        || {
+            (
+                Vec::with_capacity(mesh.vertices.len()),
+                Vec::with_capacity(mesh.normals.len()),
+            )
+        },
+        |geometry| (geometry.vertices, geometry.normals),
+    );
+    vertices.clear();
+    vertices.extend_from_slice(&mesh.vertices);
+    normals.clear();
+    normals.extend_from_slice(&mesh.normals);
+    for (position, node) in mesh.animation_nodes.iter().enumerate() {
+        let matrix = global_matrices[position];
         for range in &node.vertex_ranges {
             for offset in 0..range.len {
                 let idx = range.start + offset;
@@ -459,10 +500,11 @@ pub(crate) fn sample_mesh_geometry(
             .iter()
             .enumerate()
             .map(|(joint_index, node_index)| {
-                let joint_global = global_matrices
-                    .iter()
-                    .find(|(index, _)| index == node_index)
-                    .map(|(_, matrix)| *matrix)
+                let joint_global = node_positions
+                    .get(*node_index)
+                    .copied()
+                    .filter(|&position| position != usize::MAX)
+                    .and_then(|position| global_matrices.get(position).copied())
                     .unwrap_or_else(identity_matrix);
                 multiply_matrix(
                     joint_global,
@@ -505,39 +547,47 @@ pub(crate) fn sample_mesh_geometry(
     })
 }
 
-fn global_matrix_for_node(
-    node_index: usize,
+fn resolve_global_matrix(
+    position: usize,
     nodes: &[AnimationNode],
-    sampled_nodes: &[(usize, NodeTransform)],
-) -> [[f32; 4]; 4] {
-    global_matrix_for_node_inner(node_index, nodes, sampled_nodes, 0)
-}
-
-fn global_matrix_for_node_inner(
-    node_index: usize,
-    nodes: &[AnimationNode],
-    sampled_nodes: &[(usize, NodeTransform)],
+    node_positions: &[usize],
+    local_matrices: &[[[f32; 4]; 4]],
+    cache: &mut [Option<[[f32; 4]; 4]>],
     depth: usize,
 ) -> [[f32; 4]; 4] {
+    if let Some(matrix) = cache.get(position).copied().flatten() {
+        return matrix;
+    }
     if depth > nodes.len() {
         return identity_matrix();
     }
-    let Some(node) = nodes.iter().find(|node| node.index == node_index) else {
+    let (Some(node), Some(local)) = (nodes.get(position), local_matrices.get(position).copied())
+    else {
         return identity_matrix();
     };
-    let local = sampled_nodes
-        .iter()
-        .find(|(index, _)| *index == node_index)
-        .map(|(_, transform)| transform.matrix())
-        .unwrap_or_else(|| node.base_transform.matrix());
-    if let Some(parent) = node.parent {
+    let global = if let Some(parent_position) = node
+        .parent
+        .and_then(|parent| node_positions.get(parent).copied())
+        .filter(|&parent| parent != usize::MAX)
+    {
         multiply_matrix(
-            global_matrix_for_node_inner(parent, nodes, sampled_nodes, depth + 1),
+            resolve_global_matrix(
+                parent_position,
+                nodes,
+                node_positions,
+                local_matrices,
+                cache,
+                depth + 1,
+            ),
             local,
         )
     } else {
         local
+    };
+    if let Some(slot) = cache.get_mut(position) {
+        *slot = Some(global);
     }
+    global
 }
 
 fn skin_point(bind: Vec3, influences: &SkinnedVertex, joint_matrices: &[[[f32; 4]; 4]]) -> Vec3 {

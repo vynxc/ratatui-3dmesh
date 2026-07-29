@@ -288,9 +288,20 @@ fn append_primitive(
     let colors = reader.read_colors(0).map_or_else(Vec::new, |colors| {
         colors.into_rgba_f32().collect::<Vec<_>>()
     });
-    geometry
-        .vertex_colors
-        .extend((0..positions.len()).map(|index| colors.get(index).copied().unwrap_or([1.0; 4])));
+    if colors.is_empty() {
+        if !geometry.vertex_colors.is_empty() {
+            geometry
+                .vertex_colors
+                .extend((0..positions.len()).map(|_| [1.0; 4]));
+        }
+    } else {
+        if geometry.vertex_colors.len() < base_vertex {
+            geometry.vertex_colors.resize(base_vertex, [1.0; 4]);
+        }
+        geometry.vertex_colors.extend(
+            (0..positions.len()).map(|index| colors.get(index).copied().unwrap_or([1.0; 4])),
+        );
+    }
 
     let material_name = primitive
         .material()

@@ -1,6 +1,7 @@
 use ratatui::{buffer::Buffer, layout::Rect, style::Style};
 
 use super::camera::ProjectedVertex;
+use super::metrics::{Metrics, NoopMetrics};
 
 /// Treat opaque fragments this close in depth as the same surface. This is only a
 /// floating-point tolerance; authored close-surface decals still need to overwrite.
@@ -114,8 +115,53 @@ pub fn fill_triangle_shaded(
     tri: [ProjectedVertex; 3],
     backdrop: [u8; 3],
     decal_bias: f32,
-    mut paint: impl FnMut([f32; 3], f32) -> Option<Fragment>,
+    paint: impl FnMut([f32; 3], f32) -> Option<Fragment>,
 ) {
+    fill_triangle_shaded_profiled(
+        area,
+        buf,
+        zbuf,
+        tri,
+        backdrop,
+        decal_bias,
+        &mut NoopMetrics,
+        paint,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn fill_triangle_shaded_profiled<M: Metrics>(
+    area: Rect,
+    buf: &mut Buffer,
+    zbuf: &mut [f32],
+    tri: [ProjectedVertex; 3],
+    backdrop: [u8; 3],
+    decal_bias: f32,
+    metrics: &mut M,
+    paint: impl FnMut([f32; 3], f32) -> Option<Fragment>,
+) {
+    let Some(setup) = setup_triangle(area, tri) else {
+        metrics.skipped_triangle();
+        return;
+    };
+    fill_triangle_shaded_with_setup(
+        area, buf, zbuf, tri, setup, backdrop, decal_bias, metrics, paint,
+    );
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct TriangleSetup {
+    min_x: i32,
+    max_x: i32,
+    min_y: i32,
+    max_y: i32,
+    step_x: [f32; 3],
+    step_y: [f32; 3],
+    row_weights: [f32; 3],
+}
+
+#[inline]
+pub(crate) fn setup_triangle(area: Rect, tri: [ProjectedVertex; 3]) -> Option<TriangleSetup> {
     let [a, b, c] = tri;
     let min_x = a.x.min(b.x).min(c.x).floor().max(0.0) as i32;
     let max_x =
@@ -131,9 +177,8 @@ pub fn fill_triangle_shaded(
             .min(f32::from(area.height.saturating_sub(1))) as i32;
     let denom = edge(a.x, a.y, b.x, b.y, c.x, c.y);
     if denom.abs() <= f32::EPSILON || min_x > max_x || min_y > max_y {
-        return;
+        return None;
     }
-
     let inverse_denom = denom.recip();
     let step_x = [
         (c.y - b.y) * inverse_denom,
@@ -147,11 +192,47 @@ pub fn fill_triangle_shaded(
     ];
     let first_x = min_x as f32 + 0.5;
     let first_y = min_y as f32 + 0.5;
-    let mut row_weights = [
+    let row_weights = [
         edge(b.x, b.y, c.x, c.y, first_x, first_y) * inverse_denom,
         edge(c.x, c.y, a.x, a.y, first_x, first_y) * inverse_denom,
         edge(a.x, a.y, b.x, b.y, first_x, first_y) * inverse_denom,
     ];
+    Some(TriangleSetup {
+        min_x,
+        max_x,
+        min_y,
+        max_y,
+        step_x,
+        step_y,
+        row_weights,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn fill_triangle_shaded_with_setup<M: Metrics>(
+    area: Rect,
+    buf: &mut Buffer,
+    zbuf: &mut [f32],
+    tri: [ProjectedVertex; 3],
+    setup: TriangleSetup,
+    backdrop: [u8; 3],
+    decal_bias: f32,
+    metrics: &mut M,
+    mut paint: impl FnMut([f32; 3], f32) -> Option<Fragment>,
+) {
+    let [a, b, c] = tri;
+    let TriangleSetup {
+        min_x,
+        max_x,
+        min_y,
+        max_y,
+        step_x,
+        step_y,
+        mut row_weights,
+    } = setup;
+    let bbox_cells = (max_x - min_x + 1) as u64 * (max_y - min_y + 1) as u64;
+    metrics.raster_bbox(bbox_cells);
+    metrics.raster_visited(bbox_cells);
     let row_width = usize::from(area.width);
 
     for y in min_y..=max_y {
@@ -166,26 +247,32 @@ pub fn fill_triangle_shaded(
                 idx += 1;
                 continue;
             }
+            metrics.raster_inside();
             let depth = w0.mul_add(a.depth, w1.mul_add(b.depth, w2 * c.depth));
-            // Subtracting the bias lets a decal at the same depth as the surface behind it
-            // still pass `depth < existing` and paint on top.
             if depth - decal_bias >= zbuf[idx] {
+                metrics.depth_rejected();
                 weights[0] += step_x[0];
                 weights[1] += step_x[1];
                 weights[2] += step_x[2];
                 idx += 1;
                 continue;
             }
+            metrics.shade_call();
             let Some(fragment) = paint([w0, w1, w2], depth) else {
+                metrics.shade_discarded();
                 weights[0] += step_x[0];
                 weights[1] += step_x[1];
                 weights[2] += step_x[2];
                 idx += 1;
                 continue;
             };
-            composite_indexed(
+            if composite_indexed(
                 area, buf, zbuf, x as u16, y as u16, idx, depth, fragment, backdrop,
-            );
+            ) {
+                metrics.cell_written();
+            } else {
+                metrics.coplanar_rejected();
+            }
             weights[0] += step_x[0];
             weights[1] += step_x[1];
             weights[2] += step_x[2];
@@ -198,6 +285,67 @@ pub fn fill_triangle_shaded(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::explicit_counter_loop)]
+pub(crate) fn fill_triangle_deferred_profiled<M: Metrics>(
+    area: Rect,
+    zbuf: &mut [f32],
+    occupied: &mut [bool],
+    tri: [ProjectedVertex; 3],
+    setup: TriangleSetup,
+    decal_bias: f32,
+    metrics: &mut M,
+    mut store: impl FnMut(usize, [f32; 3]),
+) {
+    let [a, b, c] = tri;
+    let TriangleSetup {
+        min_x,
+        max_x,
+        min_y,
+        max_y,
+        step_x,
+        step_y,
+        mut row_weights,
+    } = setup;
+    let bbox_cells = (max_x - min_x + 1) as u64 * (max_y - min_y + 1) as u64;
+    metrics.raster_bbox(bbox_cells);
+    metrics.raster_visited(bbox_cells);
+    let row_width = usize::from(area.width);
+
+    for y in min_y..=max_y {
+        let mut weights = row_weights;
+        let mut idx = y as usize * row_width + min_x as usize;
+        let mut entered = false;
+        for _ in min_x..=max_x {
+            let [w0, w1, w2] = weights;
+            if w0 >= -0.0001 && w1 >= -0.0001 && w2 >= -0.0001 {
+                entered = true;
+                metrics.raster_inside();
+                let depth = w0.mul_add(a.depth, w1.mul_add(b.depth, w2 * c.depth));
+                if depth - decal_bias >= zbuf[idx] {
+                    metrics.depth_rejected();
+                } else if occupied[idx] && depth >= zbuf[idx] - OPAQUE_COPLANAR_EPSILON {
+                    metrics.coplanar_rejected();
+                } else {
+                    zbuf[idx] = depth;
+                    occupied[idx] = true;
+                    store(idx, weights);
+                }
+            } else if entered {
+                break;
+            }
+            weights[0] += step_x[0];
+            weights[1] += step_x[1];
+            weights[2] += step_x[2];
+            idx += 1;
+        }
+        row_weights[0] += step_y[0];
+        row_weights[1] += step_y[1];
+        row_weights[2] += step_y[2];
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+#[inline(always)]
 fn composite_indexed(
     area: Rect,
     buf: &mut Buffer,
@@ -208,12 +356,12 @@ fn composite_indexed(
     depth: f32,
     fragment: Fragment,
     backdrop: [u8; 3],
-) {
+) -> bool {
     let alpha = fragment.alpha.clamp(0.0, 1.0);
     let cell = &mut buf[(area.x + x, area.y + y)];
     if alpha >= 0.996 {
         if depth >= zbuf[idx] - OPAQUE_COPLANAR_EPSILON && cell.symbol() != " " {
-            return;
+            return false;
         }
         zbuf[idx] = depth;
         cell.set_char(fragment.ch);
@@ -222,7 +370,7 @@ fn composite_indexed(
             fragment.rgb[1],
             fragment.rgb[2],
         ));
-        return;
+        return true;
     }
     // Transparent: blend over whatever currently occupies the cell, then advance the depth
     // buffer to this fragment. Because blend faces are drawn back-to-front, writing depth
@@ -242,6 +390,7 @@ fn composite_indexed(
     cell.set_fg(ratatui::style::Color::Rgb(
         blended[0], blended[1], blended[2],
     ));
+    true
 }
 
 fn blend_channel(src: u8, dst: u8, alpha: f32) -> u8 {

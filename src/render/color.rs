@@ -37,18 +37,12 @@ pub(super) fn solid_base_rgb(
 
 /// Emissive RGB contribution for a cell, combining the material factor with an optional
 /// emissive texture sample. Returns `[0, 0, 0]` when the material does not emit.
-pub(super) fn emissive_rgb(
-    material: Option<&Material>,
+#[inline(always)]
+pub(super) fn emissive_rgb_from_factor(
+    factor: [f32; 3],
     sample: Option<[u8; 4]>,
-    config: &Mesh3dConfig,
+    brightness: f32,
 ) -> [u8; 3] {
-    let Some(material) = material else {
-        return [0, 0, 0];
-    };
-    if !material.is_emissive() {
-        return [0, 0, 0];
-    }
-    let factor = material.emissive;
     let texel = sample.map_or([1.0, 1.0, 1.0], |rgba| {
         [
             f32::from(rgba[0]) / 255.0,
@@ -56,14 +50,16 @@ pub(super) fn emissive_rgb(
             f32::from(rgba[2]) / 255.0,
         ]
     });
-    brighten_rgb(
-        [
-            (factor[0] * texel[0] * 255.0).round().clamp(0.0, 255.0) as u8,
-            (factor[1] * texel[1] * 255.0).round().clamp(0.0, 255.0) as u8,
-            (factor[2] * texel[2] * 255.0).round().clamp(0.0, 255.0) as u8,
-        ],
-        config.color_brightness,
-    )
+    let emissive = [
+        (factor[0] * texel[0] * 255.0).round().clamp(0.0, 255.0) as u8,
+        (factor[1] * texel[1] * 255.0).round().clamp(0.0, 255.0) as u8,
+        (factor[2] * texel[2] * 255.0).round().clamp(0.0, 255.0) as u8,
+    ];
+    if brightness == 1.0 {
+        emissive
+    } else {
+        brighten_rgb(emissive, brightness)
+    }
 }
 
 /// Add emissive light on top of an already-lit base color, saturating at white.
@@ -118,22 +114,26 @@ pub(super) fn style_for(
     }
 }
 
+#[inline(always)]
 pub(super) fn texture_rgb(rgba: [u8; 4], intensity: f32, config: &Mesh3dConfig) -> [u8; 3] {
     let lighting = if config.texture_lighting {
         intensity
     } else {
         1.0
     };
-    brighten_rgb(
-        [
-            lit_channel(rgba[0], lighting),
-            lit_channel(rgba[1], lighting),
-            lit_channel(rgba[2], lighting),
-        ],
-        config.color_brightness,
-    )
+    let lit = [
+        lit_channel(rgba[0], lighting),
+        lit_channel(rgba[1], lighting),
+        lit_channel(rgba[2], lighting),
+    ];
+    if config.color_brightness == 1.0 {
+        lit
+    } else {
+        brighten_rgb(lit, config.color_brightness)
+    }
 }
 
+#[inline(always)]
 pub(super) fn luminance(rgb: [u8; 3]) -> f32 {
     (0.2126 * f32::from(rgb[0]) + 0.7152 * f32::from(rgb[1]) + 0.0722 * f32::from(rgb[2])) / 255.0
 }
