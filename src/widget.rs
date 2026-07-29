@@ -37,6 +37,11 @@ pub struct Mesh3dState {
     pub animation_playing: bool,
     /// Whether animation playback loops at clip duration.
     pub animation_looping: bool,
+    /// Seconds blended between the clip tail and head when looping.
+    ///
+    /// A value of zero preserves an authored hard loop boundary.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub animation_loop_blend_seconds: f32,
 }
 
 impl Default for Mesh3dState {
@@ -52,6 +57,7 @@ impl Default for Mesh3dState {
             animation_speed: 1.0,
             animation_playing: true,
             animation_looping: true,
+            animation_loop_blend_seconds: 0.0,
         }
     }
 }
@@ -81,6 +87,7 @@ impl Mesh3dState {
         let animation_speed = self.animation_speed;
         let animation_playing = self.animation_playing;
         let animation_looping = self.animation_looping;
+        let animation_loop_blend_seconds = self.animation_loop_blend_seconds;
         *self = Self::default();
         self.help_visible = help_visible;
         self.auto_spin_enabled = auto_spin_enabled;
@@ -89,6 +96,7 @@ impl Mesh3dState {
         self.animation_speed = animation_speed;
         self.animation_playing = animation_playing;
         self.animation_looping = animation_looping;
+        self.animation_loop_blend_seconds = animation_loop_blend_seconds;
     }
 
     /// Toggle auto-spin.

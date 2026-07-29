@@ -220,19 +220,22 @@ impl AnimationSampler {
         if count == 1 || time_seconds <= self.inputs[0] {
             return self.outputs.first().copied();
         }
-        for index in 1..count {
-            let next_time = self.inputs[index];
-            if time_seconds <= next_time {
-                let previous_time = self.inputs[index - 1];
-                let previous = self.outputs[index - 1];
-                let next = self.outputs[index];
-                if self.interpolation == Interpolation::Step {
-                    return Some(previous);
-                }
-                let span = (next_time - previous_time).max(f32::EPSILON);
-                let t = ((time_seconds - previous_time) / span).clamp(0.0, 1.0);
-                return interpolate_value(previous, next, t);
+        if time_seconds.is_nan() {
+            return self.outputs.get(count - 1).copied();
+        }
+        let next_index = self.inputs[..count].partition_point(|&input| input < time_seconds);
+        if next_index < count {
+            let previous_index = next_index - 1;
+            let next_time = self.inputs[next_index];
+            let previous_time = self.inputs[previous_index];
+            let previous = self.outputs[previous_index];
+            let next = self.outputs[next_index];
+            if self.interpolation == Interpolation::Step {
+                return Some(previous);
             }
+            let span = (next_time - previous_time).max(f32::EPSILON);
+            let t = ((time_seconds - previous_time) / span).clamp(0.0, 1.0);
+            return interpolate_value(previous, next, t);
         }
         self.outputs.get(count - 1).copied()
     }
@@ -345,6 +348,47 @@ pub fn playback_time(time_seconds: f32, duration_seconds: f32, looping: bool) ->
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct LoopBlend {
+    from_time: f32,
+    to_time: f32,
+    weight: f32,
+}
+
+fn loop_sample(
+    time_seconds: f32,
+    duration_seconds: f32,
+    looping: bool,
+    blend_seconds: f32,
+) -> (f32, Option<LoopBlend>) {
+    if !looping
+        || !time_seconds.is_finite()
+        || duration_seconds <= f32::EPSILON
+        || !blend_seconds.is_finite()
+        || blend_seconds <= f32::EPSILON
+    {
+        return (playback_time(time_seconds, duration_seconds, looping), None);
+    }
+
+    let blend_seconds = blend_seconds.min(duration_seconds * 0.5);
+    let loop_duration = duration_seconds - blend_seconds;
+    let time = time_seconds.rem_euclid(loop_duration);
+    if time >= blend_seconds {
+        return (time, None);
+    }
+
+    let linear_weight = (time / blend_seconds).clamp(0.0, 1.0);
+    let weight = linear_weight * linear_weight * (3.0 - 2.0 * linear_weight);
+    (
+        time,
+        Some(LoopBlend {
+            from_time: loop_duration + time,
+            to_time: time,
+            weight,
+        }),
+    )
+}
+
 /// Return a transformed copy of `mesh` for a sampled animation pose.
 #[must_use]
 pub fn sample_mesh_animation(
@@ -377,7 +421,7 @@ pub(crate) fn sample_mesh_geometry(
     time_seconds: f32,
     looping: bool,
 ) -> Option<SampledGeometry> {
-    sample_mesh_geometry_reusing(mesh, clip_index, time_seconds, looping, None)
+    sample_mesh_geometry_reusing(mesh, clip_index, time_seconds, looping, 0.0, None)
 }
 
 pub(crate) fn sample_mesh_geometry_reusing(
@@ -385,6 +429,7 @@ pub(crate) fn sample_mesh_geometry_reusing(
     clip_index: usize,
     time_seconds: f32,
     looping: bool,
+    loop_blend_seconds: f32,
     reuse: Option<SampledGeometry>,
 ) -> Option<SampledGeometry> {
     let clip = mesh.animations.get(clip_index)?;
@@ -392,7 +437,12 @@ pub(crate) fn sample_mesh_geometry_reusing(
         return None;
     }
 
-    let time = playback_time(time_seconds, clip.duration_seconds, looping);
+    let (time, loop_blend) = loop_sample(
+        time_seconds,
+        clip.duration_seconds,
+        looping,
+        loop_blend_seconds,
+    );
     let mut node_positions = vec![
         usize::MAX;
         mesh.animation_nodes
@@ -420,7 +470,15 @@ pub(crate) fn sample_mesh_geometry_reusing(
             continue;
         };
         let transform = &mut sampled_nodes[position];
-        let Some(value) = channel.sampler.sample(time) else {
+        let value = loop_blend.map_or_else(
+            || channel.sampler.sample(time),
+            |blend| {
+                let from = channel.sampler.sample(blend.from_time)?;
+                let to = channel.sampler.sample(blend.to_time)?;
+                interpolate_value(from, to, blend.weight)
+            },
+        );
+        let Some(value) = value else {
             continue;
         };
         match (channel.property, value) {
@@ -778,9 +836,44 @@ mod tests {
     }
 
     #[test]
+    fn sampling_nan_preserves_last_keyframe_fallback() {
+        assert_eq!(
+            vec3_sampler(Interpolation::Linear).sample(f32::NAN),
+            Some(AnimationValue::Vec3(Vec3::new(10.0, 0.0, 0.0)))
+        );
+    }
+
+    #[test]
     fn normalizes_playback_time() {
         assert_eq!(playback_time(2.5, 1.0, true), 0.5);
         assert_eq!(playback_time(2.5, 1.0, false), 1.0);
+    }
+
+    #[test]
+    fn loop_blend_overlaps_tail_and_head_without_a_wrap_jump() {
+        let (_, at_wrap) = loop_sample(8.0, 10.0, true, 2.0);
+        assert_eq!(
+            at_wrap,
+            Some(LoopBlend {
+                from_time: 8.0,
+                to_time: 0.0,
+                weight: 0.0,
+            })
+        );
+
+        let (_, halfway) = loop_sample(9.0, 10.0, true, 2.0);
+        assert_eq!(
+            halfway,
+            Some(LoopBlend {
+                from_time: 9.0,
+                to_time: 1.0,
+                weight: 0.5,
+            })
+        );
+
+        let (after_blend, blend) = loop_sample(10.0, 10.0, true, 2.0);
+        assert_eq!(after_blend, 2.0);
+        assert_eq!(blend, None);
     }
 
     #[test]

@@ -274,6 +274,7 @@ fn render_mesh_impl<M: Metrics>(
             clip,
             state.animation_time_seconds,
             state.animation_looping,
+            state.animation_loop_blend_seconds,
             reuse,
         )
     });
