@@ -20,26 +20,18 @@ This crate is built for embedding. Your app owns terminal initialization, layout
 
 ## Install
 
-Until the crate is published to crates.io, depend on it straight from GitHub:
+Install the crate from crates.io:
 
 ```toml
 [dependencies]
-ratatui-3dmesh = { git = "https://github.com/vynxc/ratatui-3dmesh" }
-ratatui = "0.29"
+ratatui-3dmesh = "0.1.3"
+ratatui = "0.30.2"
 ```
 
-Pin to a tag or commit for reproducible builds:
+Alternatively, depend on the matching GitHub tag:
 
 ```toml
-ratatui-3dmesh = { git = "https://github.com/vynxc/ratatui-3dmesh", tag = "v0.1.0" }
-```
-
-Once it lands on crates.io, the version form works too:
-
-```toml
-[dependencies]
-ratatui-3dmesh = "0.1"
-ratatui = "0.29"
+ratatui-3dmesh = { git = "https://github.com/vynxc/ratatui-3dmesh", tag = "v0.1.3" }
 ```
 
 The default features (`obj`, `mtl`, `gltf`, `textures`) load OBJ and glTF/GLB with textures out of the box. For keyboard helpers based on crossterm, add the `cli-example` feature:

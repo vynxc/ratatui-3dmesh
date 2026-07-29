@@ -1,6 +1,6 @@
 [package]
 name = "ratatui-3dmesh"
-version = "0.1.2"
+version = "0.1.3"
 edition = "2021"
 rust-version = "1.88"
 description = "A reusable Ratatui widget for rendering OBJ/glTF/GLB 3D meshes as shaded terminal ASCII."
@@ -14,6 +14,7 @@ categories = ["command-line-interface", "rendering", "visualization"]
 # Keep the published crate lean and reproducible: local-only model dumps, planning
 # notes, and the code-memory index are never part of a release.
 exclude = [
+    "AGENTS.md",
     "models/",
     ".mimir/",
     ".codebase-memory/",
